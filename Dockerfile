@@ -30,7 +30,7 @@ FROM scratch AS binary
 COPY --from=build /out/* /
 
 # runtime
-FROM debian:trixie AS runtime
+FROM debian:trixie-20260421 AS runtime
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
