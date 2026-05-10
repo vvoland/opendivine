@@ -14,6 +14,7 @@ on:
 
 env:
   TAG: ${{ inputs.tag || github.ref_name }}
+  REPOSITORY: ${{ github.repository }}
 
 permissions:
   contents: read
@@ -97,6 +98,7 @@ jobs:
           mapfile -t files < <(find artifacts -type f | sort)
           printf 'Uploading files:\n%s\n' "${files[*]}"
           gh release create "${{ env.TAG }}" \
+            --repo "${{ env.REPOSITORY }}" \
             --title "${{ env.TAG }}" \
             --draft \
             --generate-notes \
