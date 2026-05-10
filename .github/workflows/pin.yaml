@@ -3,7 +3,7 @@ name: Action Pin Diff
 on:
   pull_request:
     paths:
-      - '.github/workflows/**'
+      - ".github/workflows/**"
 
 permissions:
   contents: read

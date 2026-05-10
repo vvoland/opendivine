@@ -13,4 +13,3 @@ target "binary" {
     ]
     platforms = ["local"]
 }
-

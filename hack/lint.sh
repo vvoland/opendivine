@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-only
+
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+ERROR=$'\033[1;31m'
 INFO=$'\033[1;34m'
 GREY=$'\033[90m'
 RESET=$'\033[0m'
@@ -111,6 +114,32 @@ lint_shfmt() {
         lint/shfmt -d hack
 }
 
+lint_license() {
+    printf "%s> Checking license headers%s\n" "$INFO" "$RESET"
+
+    local missing=()
+    local file
+    while IFS= read -r file; do
+        case "$file" in
+            vendor/*) continue ;;
+            *.go | *.sh) ;;
+            *) continue ;;
+        esac
+
+        if ! head -n 5 "$file" | grep -Eq 'SPDX-License-Identifier:'; then
+            missing+=("$file")
+        fi
+    done < <(git ls-files)
+
+    if ((${#missing[@]} > 0)); then
+        printf '%s! Missing SPDX license header in:%s\n' "$ERROR" "$RESET" >&2
+        printf '  %s\n' "${missing[@]}" >&2
+        return 1
+    fi
+
+    printf 'All checked files contain an SPDX license header.\n'
+}
+
 fmt_shfmt() {
     build shfmt
     printf "%s> Formatting shell scripts%s\n" "$INFO" "$RESET"
@@ -136,11 +165,12 @@ case "${1:-}" in
     golangci-lint) lint_golangci_lint ;;
     modernize) lint_modernize ;;
     shfmt) lint_shfmt ;;
+    license) lint_license ;;
     fmt-shfmt) fmt_shfmt ;;
     fmt-golangci-lint) fmt_golangci_lint ;;
     fmt-modernize) fmt_modernize ;;
     *)
-        echo "usage: $0 {yamllint|actionlint|golangci-lint|modernize|shfmt|fmt-shfmt|fmt-golangci-lint|fmt-modernize}" >&2
+        echo "usage: $0 {yamllint|actionlint|golangci-lint|modernize|shfmt|license|fmt-shfmt|fmt-golangci-lint|fmt-modernize}" >&2
         exit 2
         ;;
 esac

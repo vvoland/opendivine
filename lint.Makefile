@@ -1,5 +1,5 @@
 .PHONY: lint
-lint: yaml go shell
+lint: yaml go shell license
 
 .PHONY: yaml
 yaml: yamllint actionlint
@@ -9,6 +9,10 @@ go: modernize golangci-lint
 
 .PHONY: shell
 shell: shfmt
+
+.PHONY: license
+license:
+	@hack/lint.sh license
 
 .PHONY: yamllint
 yamllint:

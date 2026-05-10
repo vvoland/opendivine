@@ -4,8 +4,8 @@ linters:
   disable:
     - errcheck
   enable:
-    - intrange         # Go 1.22+ `for i := range n`
-    - copyloopvar      # Go 1.22+ loop var scoping
-    - usestdlibvars    # use stdlib constants (http.MethodGet, etc.)
-    - perfsprint       # avoid fmt.Sprintf when a conversion suffices
-    - mirror           # prefer bytes.X over string(b) + strings.X
+    - intrange # Go 1.22+ `for i := range n`
+    - copyloopvar # Go 1.22+ loop var scoping
+    - usestdlibvars # use stdlib constants (http.MethodGet, etc.)
+    - perfsprint # avoid fmt.Sprintf when a conversion suffices
+    - mirror # prefer bytes.X over string(b) + strings.X
