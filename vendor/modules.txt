@@ -16,6 +16,11 @@ github.com/ebitengine/gomobile/internal/mobileinit
 # github.com/ebitengine/hideconsole v1.0.0
 ## explicit; go 1.18
 github.com/ebitengine/hideconsole
+# github.com/ebitengine/oto/v3 v3.4.0
+## explicit; go 1.24.0
+github.com/ebitengine/oto/v3
+github.com/ebitengine/oto/v3/internal/mux
+github.com/ebitengine/oto/v3/internal/oboe
 # github.com/ebitengine/purego v0.9.0
 ## explicit; go 1.18
 github.com/ebitengine/purego
@@ -33,6 +38,9 @@ github.com/google/go-cmp/cmp/internal/value
 # github.com/hajimehoshi/ebiten/v2 v2.9.9
 ## explicit; go 1.24.0
 github.com/hajimehoshi/ebiten/v2
+github.com/hajimehoshi/ebiten/v2/audio
+github.com/hajimehoshi/ebiten/v2/audio/internal/convert
+github.com/hajimehoshi/ebiten/v2/audio/vorbis
 github.com/hajimehoshi/ebiten/v2/ebitenutil
 github.com/hajimehoshi/ebiten/v2/inpututil
 github.com/hajimehoshi/ebiten/v2/internal/affine
@@ -79,6 +87,12 @@ github.com/jezek/xgb
 github.com/jezek/xgb/randr
 github.com/jezek/xgb/render
 github.com/jezek/xgb/xproto
+# github.com/jfreymuth/oggvorbis v1.0.5
+## explicit; go 1.15
+github.com/jfreymuth/oggvorbis
+# github.com/jfreymuth/vorbis v1.0.2
+## explicit; go 1.15
+github.com/jfreymuth/vorbis
 # golang.org/x/sync v0.17.0
 ## explicit; go 1.24.0
 golang.org/x/sync/errgroup
