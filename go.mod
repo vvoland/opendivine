@@ -1,11 +1,11 @@
 module grono.dev/opendivine
 
-go 1.24.0
+go 1.25.0
 
 require (
 	github.com/anchore/go-lzo v0.1.0
 	github.com/hajimehoshi/ebiten/v2 v2.9.9
-	golang.org/x/image v0.31.0
+	golang.org/x/image v0.40.0
 	gotest.tools/v3 v3.5.2
 )
 
@@ -18,7 +18,7 @@ require (
 	github.com/jezek/xgb v1.1.1 // indirect
 	github.com/jfreymuth/oggvorbis v1.0.5 // indirect
 	github.com/jfreymuth/vorbis v1.0.2 // indirect
-	golang.org/x/sync v0.17.0 // indirect
+	golang.org/x/sync v0.20.0 // indirect
 	golang.org/x/sys v0.36.0 // indirect
-	golang.org/x/text v0.29.0 // indirect
+	golang.org/x/text v0.37.0 // indirect
 )
