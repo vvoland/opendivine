@@ -154,13 +154,45 @@ That was wrong.  The engine (`FUN_0050ac30` lines 224-238) treats:
 | +16    | AttachPairs[12]int16 | (see below)                  |
 
 There is **no separate hotspot field**.  The agent's world position
-`(X, Y)` corresponds to the per-class anchor `(CX, CY)` in
-composite coords (set by `FUN_0050bb10`), and a frame's world
-top-left is therefore `(X + XMin − CX, Y + YMin − CY)` with the
-sprite occupying `Width × Height` pixels.  All layers (A, B, C, D,
-E) use the same formula — the natural overlap between layers comes
-from the artists drawing each layer with overlapping XMin/YMin
-ranges.  No seam-snap is needed.
+`(X, Y)` corresponds to a per-class anchor `(CX, CY)` in composite
+coords, and a frame's world top-left is therefore
+`(X + XMin − CX, Y + YMin − CY)` with the sprite occupying
+`Width × Height` pixels.  All layers (A, B, C, D, E) use the same
+formula — the natural overlap between layers comes from the artists
+drawing each layer with overlapping XMin/YMin ranges.  No seam-snap
+is needed.
+
+**What `(CX, CY)` actually is (measured).**  An earlier version of
+this doc claimed `(CX, CY)` is the `FUN_0050bb10` per-class pair
+(table below).  That is wrong for the horizontal axis.  The blit is
+not done from those pairs: the engine composites the layers (origin =
+the per-direction min XMin/YMin, `FUN_0050ac30`) and blits the
+composite through the shared sprite path; `FUN_0042c8e0` never
+defaults the `.key` `Center` field and no shipped `.key` carries a
+`Center` line, so `CenterX = CenterY = 0`.
+
+Decoding the real legs (layer A, group `MBA0`, all six classes) and
+measuring the opaque content gives the standing point directly:
+
+| class | MaxWidth/2 | leg-centre X | `pair[0].X` | foot row Y | `pair[0].Y` |
+|-------|-----------:|-------------:|------------:|-----------:|------------:|
+| surm  | 117 | 112 | 90 | 152 | 158 |
+| surf  | 116 | 107 | 88 | 144 | 146 |
+| warm  | 118 | 113 | 90 | 152 | 154 |
+| warf  | 116 | 108 | 84 | 144 | 150 |
+| wizm  | 117 | 113 | 94 | 193 | 192 |
+| wizf  | 116 | 108 | 82 | 177 | 184 |
+
+So:
+- `CX = MaxWidth/2` (frame centre, within ~5–9px of the measured leg
+  centre for every class).  `pair[0].X` (82–94) sits ~20–30px left of
+  the legs and is **not** the blit X anchor.
+- `CY` = the per-class foot line, which matches `pair[0].Y` to within a
+  few px for every class.  This is the one part of the `FUN_0050bb10`
+  pair that does feed the world anchor.
+
+The OpenDivine viewer uses `CX = MaxWidth/2` and `CY = pair[0].Y`
+(`heroFootY` in `internal/game/character`).
 
 This single fix eliminated the gap-between-kilt-and-legs that all
 prior iterations had been trying to compensate for empirically.

@@ -43,12 +43,9 @@ type Character struct {
 	// Step advance AnimIdx so the cycle plays.
 	ForceSlot int
 
-	// ClassAnchorX, ClassAnchorY: layer-A's hotspot position within the
-	// per-class composite frame.
-	// Hard-coded per class in FUN_0050bb10.
-	// All other layers' (B, C, D, E) per-frame attach offsets are positions in
-	// the same composite-frame coordinate system, so layer L's hotspot in world
-	// = (X, Y) + (layerAttach − classAnchor).
+	// ClassAnchorX, ClassAnchorY: the composite-frame point that maps to
+	// the character's world (X, Y) standing position.  X is the frame
+	// centre (MaxWidth/2); Y is the per-class foot line (see heroFootY).
 	ClassAnchorX, ClassAnchorY int
 
 	// CompMaxHeight: per-class .key "Max size" height, full vertical
@@ -71,17 +68,16 @@ func (c *Character) CameraTarget() (float64, float64) {
 	return c.X, c.Y - bias
 }
 
-type heroClassAnchor struct{ X, Y int }
-
-// heroClassAnchors are layer A's hotspot position in the per-class
-// composite frame.
-var heroClassAnchors = map[string]heroClassAnchor{
-	"surm": {90, 158},
-	"surf": {88, 146},
-	"warm": {90, 154},
-	"warf": {84, 150},
-	"wizm": {94, 192},
-	"wizf": {82, 184},
+// heroFootY is the per-class foot line: the composite-frame Y that the
+// character's world Y maps onto.  Verified against the decoded legs; see
+// re_docs/render-hero.md.
+var heroFootY = map[string]int{
+	"surm": 158,
+	"surf": 146,
+	"warm": 154,
+	"warf": 150,
+	"wizm": 192,
+	"wizf": 184,
 }
 
 // heroLayer is one body/equipment layer in a character's composite stack.
@@ -118,11 +114,13 @@ func Load(gameDir, class string, variants ...string) (*Character, error) {
 		}
 		dataF.Close()
 	}
-	if a, ok := heroClassAnchors[strings.ToLower(class)]; ok {
-		c.ClassAnchorX, c.ClassAnchorY = a.X, a.Y
+	// World (X, Y) is the standing point: horizontally the frame centre,
+	// vertically the per-class foot line.
+	c.ClassAnchorX = k.MaxWidth / 2
+	if y, ok := heroFootY[strings.ToLower(class)]; ok {
+		c.ClassAnchorY = y
 	} else {
-		// fall back to MaxWidth/2, MaxHeight (feet at bottom-center)
-		c.ClassAnchorX, c.ClassAnchorY = k.MaxWidth/2, k.MaxHeight
+		c.ClassAnchorY = k.MaxHeight
 	}
 	c.CompMaxHeight = k.MaxHeight
 	for _, variant := range variants {
