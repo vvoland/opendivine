@@ -33,8 +33,16 @@ struct Entry {
     u32 width;                     // cell width in pixels (e.g. 170)
     u32 height;                    // cell height in pixels (e.g. 127)
     u32 flags;                     // bit 0x01 = standard sprite path (most cells); bit 0x10 = special
-    u32 anchor_x;                  // sprite anchor / origin offset
-    u32 anchor_y;
+    u32 anchor_x;                  // NOT the render anchor: a near-constant ~2px
+    u32 anchor_y;                  // encoder inset (anchor_x is 1..26, almost always 2,
+                                   // across all 7208 CPacked.0 entries; anchor_y is 0 for
+                                   // ~75%).  The object blit (FUN_00556a80) reads the cell
+                                   // payload's width/height (+0x8/+0xa) for clipping and
+                                   // takes the destination top-left from its caller; it
+                                   // never reads these index fields.  Objects render with
+                                   // top-left at world (X, Y) (see render-trace.md), so
+                                   // subtracting anchor_x/anchor_y just shifts every sprite
+                                   // ~2px and is wrong.
     u32 width_minus_1;             // = width  - 1
     u32 height_minus_1;            // = height - 1
     u32 packed_dims;               // (sub_height << 16) | sub_width — interpretation TBD.
