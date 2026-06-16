@@ -193,11 +193,58 @@ func (g *Game) tryInteract(wx, wy float64) bool {
 	in := &g.insts[best]
 	// Too far to reach: let the click fall through to walk toward it; the
 	// player can click again once adjacent. (Auto-use-on-arrival is TBD.)
-	if math.Hypot(float64(in.X)-g.player.X, float64(in.Y)-g.player.Y) > useReach {
+	if g.interactionDistance(in) > useReach {
 		return false
 	}
 	g.useObject(in)
 	return true
+}
+
+func (g *Game) interactionDistance(in *objectInst) float64 {
+	if in.ColliderIdx >= 0 && in.ColliderIdx < len(g.colliders) {
+		return pointAABBDistance(g.player.X, g.player.Y, g.colliders[in.ColliderIdx].box)
+	}
+
+	w, h := in.SpriteW, in.SpriteH
+	if (w <= 0 || h <= 0) && g.objReader != nil {
+		if e, err := g.objReader.Entry(in.ObjID); err == nil {
+			w = int(e.Width)
+			h = int(e.Height)
+		}
+	}
+	if w > 0 && h > 0 {
+		return pointAABBDistance(g.player.X, g.player.Y, aabb{
+			X: in.X,
+			Y: in.Y - in.Elev,
+			W: w,
+			H: h,
+		})
+	}
+
+	return math.Hypot(float64(in.X)-g.player.X, float64(in.Y)-g.player.Y)
+}
+
+func pointAABBDistance(px, py float64, box aabb) float64 {
+	minX := float64(box.X)
+	maxX := float64(box.X + box.W)
+	minY := float64(box.Y)
+	maxY := float64(box.Y + box.H)
+
+	dx := 0.0
+	if px < minX {
+		dx = minX - px
+	} else if px > maxX {
+		dx = px - maxX
+	}
+
+	dy := 0.0
+	if py < minY {
+		dy = minY - py
+	} else if py > maxY {
+		dy = py - maxY
+	}
+
+	return math.Hypot(dx, dy)
 }
 
 func (g *Game) objectAtWorld(wx, wy float64, interactiveOnly bool) int {

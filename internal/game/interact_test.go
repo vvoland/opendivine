@@ -76,6 +76,29 @@ func TestTryInteract(t *testing.T) {
 	}
 }
 
+
+func TestTryInteractUsesColliderForReach(t *testing.T) {
+	g := &Game{
+		player: &character.Character{X: 1000, Y: 1040},
+		colliders: []collider{
+			{box: aabb{X: 994, Y: 1014, W: 12, H: 12}, enabled: true},
+		},
+		insts: []objectInst{
+			{
+				X: 1000, Y: 900, ObjID: 1, SpriteW: 20, SpriteH: 140,
+				Interactive: true, ColliderIdx: 0,
+			},
+		},
+	}
+
+	if !g.tryInteract(1010, 950) {
+		t.Fatalf("tryInteract handled = false, want true")
+	}
+	if !g.insts[0].Open {
+		t.Errorf("ladder-like object Open = false, want true")
+	}
+}
+
 // Opening then closing a door restores its blocker, and a door cannot be closed
 // while the player stands in its cell.
 func TestUseObjectToggle(t *testing.T) {
