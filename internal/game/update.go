@@ -86,8 +86,12 @@ func (g *Game) Update() error {
 		// Inverse of worldToScreen.
 		wx := (float64(mx)-float64(g.winW)/2.0)/g.zoom + g.camX
 		wy := (float64(my)-float64(g.winH)/2.0)/g.zoom + g.camY
-		g.destX, g.destY = wx, wy
-		g.hasDest = true
+		// A click on an in-reach interactive object uses it; otherwise it's a
+		// click-to-walk target.
+		if !g.tryInteract(wx, wy) {
+			g.destX, g.destY = wx, wy
+			g.hasDest = true
+		}
 	}
 
 	dx, dy := 0.0, 0.0
@@ -166,6 +170,70 @@ func (g *Game) Update() error {
 	return nil
 }
 
+// useReach is how close (world px) the player's foot must be to an interactive
+// object to use it — roughly 1.5 cells.
+const useReach = 96.0
+
+// tryInteract uses the interactive object nearest the click point, if the
+// player is within reach of it. Returns true when it handled the click so the
+// caller skips click-to-walk.
+//
+// This is the world-visible core of the engine's CObject::Use door/chest path
+// (re_docs/object-interaction.md): flip sb_closed and un/re-occupy the
+// collision grid. Open-frame animation, sounds, locks/keys, levers and
+// scripted (Osiris) objects are intentionally not wired yet.
+func (g *Game) tryInteract(wx, wy float64) bool {
+	// Pick the interactive object whose foot is closest to the click, within a
+	// small pixel radius (same hit model as the hover readout in Draw).
+	const hitR2 = 28.0 * 28.0
+	best := -1
+	bestD2 := hitR2
+	for i := range g.insts {
+		in := &g.insts[i]
+		if !in.Interactive {
+			continue
+		}
+		dx := float64(in.X) - wx
+		dy := float64(in.Y) - wy
+		if d2 := dx*dx + dy*dy; d2 < bestD2 {
+			bestD2 = d2
+			best = i
+		}
+	}
+	if best < 0 {
+		return false
+	}
+	in := &g.insts[best]
+	// Too far to reach: let the click fall through to walk toward it; the
+	// player can click again once adjacent. (Auto-use-on-arrival is TBD.)
+	if math.Hypot(float64(in.X)-g.player.X, float64(in.Y)-g.player.Y) > useReach {
+		return false
+	}
+	g.useObject(in)
+	return true
+}
+
+// useObject toggles a door/chest between open and closed and flips its collider
+// so an open object is passable. A door is never closed onto the player.
+func (g *Game) useObject(in *objectInst) {
+	if in.ColliderIdx < 0 {
+		return
+	}
+	if in.Open && g.playerOnCollider(in.ColliderIdx) {
+		return
+	}
+	in.Open = !in.Open
+	g.colliders[in.ColliderIdx].enabled = !in.Open
+}
+
+// playerOnCollider reports whether the player's footprint overlaps a collider
+// box, so a door can't be closed while the player stands in it.
+func (g *Game) playerOnCollider(idx int) bool {
+	const half = 6
+	pb := aabb{X: int(g.player.X) - half, Y: int(g.player.Y) - half, W: half * 2, H: half * 2}
+	return pb.intersects(g.colliders[idx].box)
+}
+
 // playerBlocked reports whether the player's footprint (a small AABB centered
 // on (px, py)) overlaps any wall collider.
 // Uses the 64×64 grid bucket index, the player overlaps at most 4 buckets so
@@ -180,7 +248,8 @@ func (g *Game) playerBlocked(px, py float64) bool {
 	for cy := minCY; cy <= maxCY; cy++ {
 		for cx := minCX; cx <= maxCX; cx++ {
 			for _, idx := range g.colliderGrid[cy*worldCellsX+cx] {
-				if pb.intersects(g.colliders[idx]) {
+				c := g.colliders[idx]
+				if c.enabled && pb.intersects(c.box) {
 					return true
 				}
 			}

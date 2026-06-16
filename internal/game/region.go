@@ -57,31 +57,30 @@ func (g *Game) loadRegion(n int) error {
 			catID := int(o.CatalogueID)
 			wx := cellX + int(o.SubX)
 			wy := cellY + int(o.SubY)
-			g.insts = append(g.insts, objectInst{
-				X:     wx,
-				Y:     wy,
-				ObjID: catID,
-				Layer: int(o.Layer),
-				Elev:  int(o.Layer),
-			})
+			inst := objectInst{
+				X:           wx,
+				Y:           wy,
+				ObjID:       catID,
+				Layer:       int(o.Layer),
+				Elev:        int(o.Layer),
+				ColliderIdx: -1,
+			}
 			// Build collision rect for blocker objects.
 			// Type=1 - static obstacle,
-			// Type=2 - interactive (door, chest).
-			// We block both for now, interactive objects need usage before they
-			// let the player through.
+			// Type=2 - interactive (door, chest): blocks while closed, but the
+			// player can open it to pass (see useObject / tryInteract).
 			// Width-zero / no-Z entries (decals, ground stains) don't block.
 			if g.collide0 != nil && catID < len(g.collide0.Records) {
 				cr := g.collide0.Records[catID]
 				if cr.Type != 0 && cr.ZHeight > 0 && cr.Width > 0 {
 					hw := max(int(cr.Width)/2, 1)
-					g.colliders = append(g.colliders, aabb{
-						X: wx - hw,
-						Y: wy - hw,
-						W: hw * 2,
-						H: hw * 2,
-					})
+					box := aabb{X: wx - hw, Y: wy - hw, W: hw * 2, H: hw * 2}
+					inst.ColliderIdx = len(g.colliders)
+					inst.Interactive = cr.Type == 2
+					g.colliders = append(g.colliders, collider{box: box, enabled: true})
 				}
 			}
+			g.insts = append(g.insts, inst)
 		}
 	}); err != nil {
 		return fmt.Errorf("walk world.x%d: %w", n, err)
@@ -109,7 +108,8 @@ func (g *Game) loadRegion(n int) error {
 	})
 
 	// Bucket colliders into 64x64-px cells for fast spatial queries.
-	for i, c := range g.colliders {
+	for i := range g.colliders {
+		c := g.colliders[i].box
 		minCX := c.X / cellPx
 		maxCX := (c.X + c.W - 1) / cellPx
 		minCY := c.Y / cellPx

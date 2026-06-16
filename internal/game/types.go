@@ -29,6 +29,22 @@ type objectInst struct {
 	// For walls (SBLightBlocker), Elev = 0, walls render at top-left regardless
 	// of layer.
 	Elev int
+
+	// Interactive marks a collide-type-2 object (door / chest) the player can
+	// use; see re_docs/object-interaction.md. Open is its runtime open/closed
+	// state (the engine's sb_closed bit). ColliderIdx indexes its blocker in
+	// g.colliders, or -1 if it has none.
+	Interactive bool
+	Open        bool
+	ColliderIdx int
+}
+
+// collider is one blocker box. A door's collider is disabled while it is open
+// so the player can walk through; this mirrors the engine un-occupying the
+// collision grid on CObject::Use (re_docs/object-interaction.md).
+type collider struct {
+	box     aabb
+	enabled bool
 }
 
 // floorCell is a populated world cell with non-default floor data.

@@ -120,6 +120,12 @@ func (g *Game) Draw(screen *ebiten.Image) {
 		op := &ebiten.DrawImageOptions{}
 		op.GeoM.Scale(g.zoom, g.zoom)
 		op.GeoM.Translate(sx, sy)
+		if in.Open {
+			// Placeholder for the engine's open-frame swap: fade an opened
+			// door/chest so its state is visible until the open animation
+			// frame is wired (re_docs/object-interaction.md).
+			op.ColorScale.ScaleAlpha(0.35)
+		}
 		screen.DrawImage(spr.img, op)
 		objDrawn++
 	}
@@ -360,6 +366,13 @@ func (g *Game) Draw(screen *ebiten.Image) {
 			sb = e.SBFlags
 		}
 		fmt.Fprintf(msg, "\n  obj id=%d %q  layer=%d  sb=0x%05x", in.ObjID, name, in.Layer, sb)
+		if in.Interactive {
+			state := "closed"
+			if in.Open {
+				state = "open"
+			}
+			fmt.Fprintf(msg, "  [interactive: %s]", state)
+		}
 	}
 
 	ebitenutil.DebugPrint(screen, msg.String())

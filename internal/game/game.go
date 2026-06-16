@@ -24,7 +24,7 @@ type Game struct {
 
 	cells     []floorCell  // all populated cells, sorted by (CellY, CellX)
 	insts     []objectInst // all placed objects, sorted by (Layer, Y)
-	colliders []aabb       // axis-aligned blocker rects (player can't pass)
+	colliders []collider   // axis-aligned blocker boxes (player can't pass)
 	// colliderGrid: 64x64-pixel bucket index over g.colliders.  Key
 	// = cellY*worldCellsX + cellX; value = indices into g.colliders
 	// for any rect touching that cell.  A wall larger than a cell
