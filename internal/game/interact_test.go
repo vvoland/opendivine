@@ -17,7 +17,7 @@ func newInteractGame(px, py float64) *Game {
 			{box: aabb{X: 994, Y: 994, W: 12, H: 12}, enabled: true},
 		},
 		insts: []objectInst{
-			{X: 1000, Y: 1000, ObjID: 1, Interactive: true, ColliderIdx: 0},
+			{X: 1000, Y: 1000, ObjID: 1, Elev: 50, SpriteW: 40, SpriteH: 100, Interactive: true, ColliderIdx: 0},
 		},
 	}
 	return g
@@ -33,12 +33,22 @@ func TestTryInteract(t *testing.T) {
 	}{
 		{
 			name: "click near door in reach opens it",
-			px:   1000, py: 1040, cx: 1000, cy: 1000,
+			px:   1000, py: 1040, cx: 1020, cy: 1000,
+			wantHandled: true, wantOpen: true,
+		},
+		{
+			name: "click visible sprite above foot opens it",
+			px:   1000, py: 1040, cx: 1020, cy: 960,
 			wantHandled: true, wantOpen: true,
 		},
 		{
 			name: "click on door but player too far walks instead",
-			px:   1000, py: 1400, cx: 1000, cy: 1000,
+			px:   1000, py: 1400, cx: 1020, cy: 1000,
+			wantHandled: false, wantOpen: false,
+		},
+		{
+			name: "click near foot but outside sprite is not handled",
+			px:   1000, py: 1010, cx: 990, cy: 1000,
 			wantHandled: false, wantOpen: false,
 		},
 		{

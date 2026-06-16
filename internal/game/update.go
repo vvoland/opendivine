@@ -183,23 +183,10 @@ const useReach = 96.0
 // collision grid. Open-frame animation, sounds, locks/keys, levers and
 // scripted (Osiris) objects are intentionally not wired yet.
 func (g *Game) tryInteract(wx, wy float64) bool {
-	// Pick the interactive object whose foot is closest to the click, within a
-	// small pixel radius (same hit model as the hover readout in Draw).
-	const hitR2 = 28.0 * 28.0
-	best := -1
-	bestD2 := hitR2
-	for i := range g.insts {
-		in := &g.insts[i]
-		if !in.Interactive {
-			continue
-		}
-		dx := float64(in.X) - wx
-		dy := float64(in.Y) - wy
-		if d2 := dx*dx + dy*dy; d2 < bestD2 {
-			bestD2 = d2
-			best = i
-		}
-	}
+	// Pick the topmost interactive object whose rendered sprite contains the
+	// click. This matches what the player sees; falling back to the old foot
+	// radius only covers objects whose sprite dimensions could not be loaded.
+	best := g.objectAtWorld(wx, wy, true)
 	if best < 0 {
 		return false
 	}
@@ -211,6 +198,41 @@ func (g *Game) tryInteract(wx, wy float64) bool {
 	}
 	g.useObject(in)
 	return true
+}
+
+func (g *Game) objectAtWorld(wx, wy float64, interactiveOnly bool) int {
+	best := -1
+	for i := range g.insts {
+		in := &g.insts[i]
+		if interactiveOnly && !in.Interactive {
+			continue
+		}
+		if !g.objectContainsWorld(in, wx, wy) {
+			continue
+		}
+		best = i
+	}
+	return best
+}
+
+func (g *Game) objectContainsWorld(in *objectInst, wx, wy float64) bool {
+	w, h := in.SpriteW, in.SpriteH
+	if (w <= 0 || h <= 0) && g.objReader != nil {
+		if e, err := g.objReader.Entry(in.ObjID); err == nil {
+			w = int(e.Width)
+			h = int(e.Height)
+		}
+	}
+	if w > 0 && h > 0 {
+		x := float64(in.X)
+		y := float64(in.Y - in.Elev)
+		return wx >= x && wx < x+float64(w) && wy >= y && wy < y+float64(h)
+	}
+
+	const footHitR2 = 28.0 * 28.0
+	dx := float64(in.X) - wx
+	dy := float64(in.Y) - wy
+	return dx*dx+dy*dy < footHitR2
 }
 
 // useObject toggles a door/chest between open and closed and flips its collider

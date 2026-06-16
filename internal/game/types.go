@@ -23,6 +23,8 @@ type sprite struct {
 type objectInst struct {
 	X, Y, ObjID int
 	Layer       int
+	SpriteW     int
+	SpriteH     int
 	// Elev is the precomputed Y offset.
 	// For most objects Elev = Layer (the engine's cumulative pixel elevation
 	// per FUN_005830c0).

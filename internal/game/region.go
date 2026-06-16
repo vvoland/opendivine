@@ -65,6 +65,12 @@ func (g *Game) loadRegion(n int) error {
 				Elev:        int(o.Layer),
 				ColliderIdx: -1,
 			}
+			if g.objReader != nil {
+				if e, err := g.objReader.Entry(catID); err == nil {
+					inst.SpriteW = int(e.Width)
+					inst.SpriteH = int(e.Height)
+				}
+			}
 			// Build collision rect for blocker objects.
 			// Type=1 - static obstacle,
 			// Type=2 - interactive (door, chest): blocks while closed, but the
