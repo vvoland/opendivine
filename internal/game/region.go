@@ -10,6 +10,7 @@ import (
 
 	"github.com/hajimehoshi/ebiten/v2"
 
+	"grono.dev/opendivine/pkg/assets/objects"
 	"grono.dev/opendivine/pkg/assets/world"
 )
 
@@ -65,6 +66,9 @@ func (g *Game) loadRegion(n int) error {
 				Elev:        int(o.Layer),
 				ColliderIdx: -1,
 			}
+			if g.catalog != nil && catID >= 0 && catID < len(g.catalog.Entries) {
+				inst.Interactive = g.catalog.Entries[catID].HasSB(objects.SBUseClass)
+			}
 			if g.objReader != nil {
 				if e, err := g.objReader.Entry(catID); err == nil {
 					inst.SpriteW = int(e.Width)
@@ -82,7 +86,10 @@ func (g *Game) loadRegion(n int) error {
 					hw := max(int(cr.Width)/2, 1)
 					box := aabb{X: wx - hw, Y: wy - hw, W: hw * 2, H: hw * 2}
 					inst.ColliderIdx = len(g.colliders)
-					inst.Interactive = cr.Type == 2
+					if cr.Type == 2 {
+						inst.Interactive = true
+						inst.ToggleCollider = true
+					}
 					g.colliders = append(g.colliders, collider{box: box, enabled: true})
 				}
 			}

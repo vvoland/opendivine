@@ -5,6 +5,8 @@ package game
 import (
 	"testing"
 
+	"gotest.tools/v3/assert"
+	"gotest.tools/v3/assert/cmp"
 	"grono.dev/opendivine/internal/game/character"
 )
 
@@ -17,7 +19,10 @@ func newInteractGame(px, py float64) *Game {
 			{box: aabb{X: 994, Y: 994, W: 12, H: 12}, enabled: true},
 		},
 		insts: []objectInst{
-			{X: 1000, Y: 1000, ObjID: 1, Elev: 50, SpriteW: 40, SpriteH: 100, Interactive: true, ColliderIdx: 0},
+			{
+				X: 1000, Y: 1000, ObjID: 1, Elev: 50, SpriteW: 40, SpriteH: 100,
+				Interactive: true, ToggleCollider: true, ColliderIdx: 0,
+			},
 		},
 	}
 	return g
@@ -86,7 +91,7 @@ func TestTryInteractUsesColliderForReach(t *testing.T) {
 		insts: []objectInst{
 			{
 				X: 1000, Y: 900, ObjID: 1, SpriteW: 20, SpriteH: 140,
-				Interactive: true, ColliderIdx: 0,
+				Interactive: true, ToggleCollider: true, ColliderIdx: 0,
 			},
 		},
 	}
@@ -97,6 +102,23 @@ func TestTryInteractUsesColliderForReach(t *testing.T) {
 	if !g.insts[0].Open {
 		t.Errorf("ladder-like object Open = false, want true")
 	}
+}
+
+func TestTryInteractConsumesUseClassObjectWithoutToggling(t *testing.T) {
+	g := &Game{
+		player: &character.Character{X: 1000, Y: 1040},
+		insts: []objectInst{
+			{
+				X: 1000, Y: 900, ObjID: 1, SpriteW: 20, SpriteH: 140,
+				Interactive: true,
+			},
+		},
+	}
+
+	handled := g.tryInteract(1010, 950)
+
+	assert.Check(t, cmp.Equal(handled, true))
+	assert.Check(t, cmp.Equal(g.insts[0].Open, false))
 }
 
 // Opening then closing a door restores its blocker, and a door cannot be closed

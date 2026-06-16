@@ -285,7 +285,7 @@ func (g *Game) objectContainsWorld(in *objectInst, wx, wy float64) bool {
 // useObject toggles a door/chest between open and closed and flips its collider
 // so an open object is passable. A door is never closed onto the player.
 func (g *Game) useObject(in *objectInst) {
-	if in.ColliderIdx < 0 {
+	if !in.ToggleCollider || in.ColliderIdx < 0 {
 		return
 	}
 	if in.Open && g.playerOnCollider(in.ColliderIdx) {
