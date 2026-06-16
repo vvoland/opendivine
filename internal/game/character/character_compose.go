@@ -14,11 +14,14 @@ package character
 // chosen from a per-helmet table).
 
 // CharacterEquipment captures the slots the composer needs.  Each
-// field holds the third character of the equipped item's catalogue
-// name, or 0 if the slot is empty.  These letters key into the
-// per-variant action mappings, a non-empty Helmet flips variants B/D
-// from "MGB0" / "MGD0" to a numbered variant like "M1B3" depending
-// on the helmet's class letter.
+// field holds a character of the equipped item's ClothingCode (the
+// objects.000 +0x3c field, a purpose-built positional visual code such
+// as "MGB0", NOT the human-readable catalogue Name), or 0 if the slot
+// is empty.  The engine reads these in FUN_0043a5b0 from the worn
+// items in equipment slots {1,2,3,4,7}; see re_docs/clothing.md.  The
+// letters key into the per-variant action mappings, a non-empty Helmet
+// flips variants B/D from "MGB0" / "MGD0" to a numbered variant like
+// "M1B3" depending on the helmet's class letter.
 type CharacterEquipment struct {
 	Helmet     byte // local_2c[0] in the engine, empty for default
 	HelmetSub  byte // local_2c[1]
