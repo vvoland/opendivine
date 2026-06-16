@@ -8,6 +8,7 @@ import (
 	"gotest.tools/v3/assert"
 	"gotest.tools/v3/assert/cmp"
 	"grono.dev/opendivine/internal/game/character"
+	"grono.dev/opendivine/pkg/assets/objects"
 )
 
 // newInteractGame builds a Game with a single interactive object at (1000,1000)
@@ -119,6 +120,15 @@ func TestTryInteractConsumesUseClassObjectWithoutToggling(t *testing.T) {
 
 	assert.Check(t, cmp.Equal(handled, true))
 	assert.Check(t, cmp.Equal(g.insts[0].Open, false))
+}
+
+func TestObjectInteractionFlagsDoesNotToggleWalls(t *testing.T) {
+	wall := &objects.Object{SBFlags: objects.SBLightBlocker}
+
+	interactive, toggleCollider := objectInteractionFlags(wall, 2)
+
+	assert.Check(t, cmp.Equal(interactive, false))
+	assert.Check(t, cmp.Equal(toggleCollider, false))
 }
 
 // Opening then closing a door restores its blocker, and a door cannot be closed
