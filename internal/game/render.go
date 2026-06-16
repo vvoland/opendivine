@@ -332,9 +332,7 @@ func (g *Game) Draw(screen *ebiten.Image) {
 		g.region, g.camX, g.camY, g.player.X, g.player.Y, follow, g.zoom, ebiten.ActualFPS())
 
 	// Hover info: world (X,Y), cell (CX,CY), and the topmost object instance
-	// whose foot is closest to the cursor (within a small pixel-radius). No RE
-	// claim is bet on; just lookups against the already-loaded world.x* and
-	// objects.000 catalog.
+	// whose rendered sprite contains the cursor.
 	mx, my := ebiten.CursorPosition()
 	hoverWX := (float64(mx)-float64(g.winW)/2.0)/g.zoom + g.camX
 	hoverWY := (float64(my)-float64(g.winH)/2.0)/g.zoom + g.camY
@@ -343,19 +341,7 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	fmt.Fprintf(msg, "\nhover  world (%.0f, %.0f)  cell (%d, %d)",
 		hoverWX, hoverWY, hoverCX, hoverCY)
 
-	// Find the closest object foot within ~24 px. Cheap O(N) over only the
-	// visible insts is fine at typical view counts.
-	closest := -1
-	closestD2 := 24.0 * 24.0
-	for i := range g.insts {
-		dx := float64(g.insts[i].X) - hoverWX
-		dy := float64(g.insts[i].Y) - hoverWY
-		d2 := dx*dx + dy*dy
-		if d2 < closestD2 {
-			closestD2 = d2
-			closest = i
-		}
-	}
+	closest := g.objectAtWorld(hoverWX, hoverWY, false)
 	if closest >= 0 {
 		in := g.insts[closest]
 		name := ""

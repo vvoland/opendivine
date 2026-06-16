@@ -183,40 +183,109 @@ const useReach = 96.0
 // collision grid. Open-frame animation, sounds, locks/keys, levers and
 // scripted (Osiris) objects are intentionally not wired yet.
 func (g *Game) tryInteract(wx, wy float64) bool {
-	// Pick the interactive object whose foot is closest to the click, within a
-	// small pixel radius (same hit model as the hover readout in Draw).
-	const hitR2 = 28.0 * 28.0
-	best := -1
-	bestD2 := hitR2
-	for i := range g.insts {
-		in := &g.insts[i]
-		if !in.Interactive {
-			continue
-		}
-		dx := float64(in.X) - wx
-		dy := float64(in.Y) - wy
-		if d2 := dx*dx + dy*dy; d2 < bestD2 {
-			bestD2 = d2
-			best = i
-		}
-	}
+	// Pick the topmost interactive object whose rendered sprite contains the
+	// click. This matches what the player sees; falling back to the old foot
+	// radius only covers objects whose sprite dimensions could not be loaded.
+	best := g.objectAtWorld(wx, wy, true)
 	if best < 0 {
 		return false
 	}
 	in := &g.insts[best]
 	// Too far to reach: let the click fall through to walk toward it; the
 	// player can click again once adjacent. (Auto-use-on-arrival is TBD.)
-	if math.Hypot(float64(in.X)-g.player.X, float64(in.Y)-g.player.Y) > useReach {
+	if g.interactionDistance(in) > useReach {
 		return false
 	}
 	g.useObject(in)
 	return true
 }
 
+func (g *Game) interactionDistance(in *objectInst) float64 {
+	if in.ColliderIdx >= 0 && in.ColliderIdx < len(g.colliders) {
+		return pointAABBDistance(g.player.X, g.player.Y, g.colliders[in.ColliderIdx].box)
+	}
+
+	w, h := in.SpriteW, in.SpriteH
+	if (w <= 0 || h <= 0) && g.objReader != nil {
+		if e, err := g.objReader.Entry(in.ObjID); err == nil {
+			w = int(e.Width)
+			h = int(e.Height)
+		}
+	}
+	if w > 0 && h > 0 {
+		return pointAABBDistance(g.player.X, g.player.Y, aabb{
+			X: in.X,
+			Y: in.Y - in.Elev,
+			W: w,
+			H: h,
+		})
+	}
+
+	return math.Hypot(float64(in.X)-g.player.X, float64(in.Y)-g.player.Y)
+}
+
+func pointAABBDistance(px, py float64, box aabb) float64 {
+	minX := float64(box.X)
+	maxX := float64(box.X + box.W)
+	minY := float64(box.Y)
+	maxY := float64(box.Y + box.H)
+
+	dx := 0.0
+	if px < minX {
+		dx = minX - px
+	} else if px > maxX {
+		dx = px - maxX
+	}
+
+	dy := 0.0
+	if py < minY {
+		dy = minY - py
+	} else if py > maxY {
+		dy = py - maxY
+	}
+
+	return math.Hypot(dx, dy)
+}
+
+func (g *Game) objectAtWorld(wx, wy float64, interactiveOnly bool) int {
+	best := -1
+	for i := range g.insts {
+		in := &g.insts[i]
+		if interactiveOnly && !in.Interactive {
+			continue
+		}
+		if !g.objectContainsWorld(in, wx, wy) {
+			continue
+		}
+		best = i
+	}
+	return best
+}
+
+func (g *Game) objectContainsWorld(in *objectInst, wx, wy float64) bool {
+	w, h := in.SpriteW, in.SpriteH
+	if (w <= 0 || h <= 0) && g.objReader != nil {
+		if e, err := g.objReader.Entry(in.ObjID); err == nil {
+			w = int(e.Width)
+			h = int(e.Height)
+		}
+	}
+	if w > 0 && h > 0 {
+		x := float64(in.X)
+		y := float64(in.Y - in.Elev)
+		return wx >= x && wx < x+float64(w) && wy >= y && wy < y+float64(h)
+	}
+
+	const footHitR2 = 28.0 * 28.0
+	dx := float64(in.X) - wx
+	dy := float64(in.Y) - wy
+	return dx*dx+dy*dy < footHitR2
+}
+
 // useObject toggles a door/chest between open and closed and flips its collider
 // so an open object is passable. A door is never closed onto the player.
 func (g *Game) useObject(in *objectInst) {
-	if in.ColliderIdx < 0 {
+	if !in.ToggleCollider || in.ColliderIdx < 0 {
 		return
 	}
 	if in.Open && g.playerOnCollider(in.ColliderIdx) {

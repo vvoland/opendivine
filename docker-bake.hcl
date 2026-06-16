@@ -2,6 +2,11 @@ group "default" {
     targets = ["binary"]
 }
 
+target "dev" {
+    target  = "build"
+    tags    = ["opendivine-dev"]
+}
+
 target "binary" {
     dockerfile = "Dockerfile"
     context = "."

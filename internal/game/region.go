@@ -10,6 +10,7 @@ import (
 
 	"github.com/hajimehoshi/ebiten/v2"
 
+	"grono.dev/opendivine/pkg/assets/objects"
 	"grono.dev/opendivine/pkg/assets/world"
 )
 
@@ -65,6 +66,17 @@ func (g *Game) loadRegion(n int) error {
 				Elev:        int(o.Layer),
 				ColliderIdx: -1,
 			}
+			var cat *objects.Object
+			if g.catalog != nil && catID >= 0 && catID < len(g.catalog.Entries) {
+				cat = &g.catalog.Entries[catID]
+				inst.Interactive, inst.ToggleCollider = objectInteractionFlags(cat, 0)
+			}
+			if g.objReader != nil {
+				if e, err := g.objReader.Entry(catID); err == nil {
+					inst.SpriteW = int(e.Width)
+					inst.SpriteH = int(e.Height)
+				}
+			}
 			// Build collision rect for blocker objects.
 			// Type=1 - static obstacle,
 			// Type=2 - interactive (door, chest): blocks while closed, but the
@@ -76,7 +88,9 @@ func (g *Game) loadRegion(n int) error {
 					hw := max(int(cr.Width)/2, 1)
 					box := aabb{X: wx - hw, Y: wy - hw, W: hw * 2, H: hw * 2}
 					inst.ColliderIdx = len(g.colliders)
-					inst.Interactive = cr.Type == 2
+					interactive, toggleCollider := objectInteractionFlags(cat, cr.Type)
+					inst.Interactive = inst.Interactive || interactive
+					inst.ToggleCollider = inst.ToggleCollider || toggleCollider
 					g.colliders = append(g.colliders, collider{box: box, enabled: true})
 				}
 			}
@@ -127,4 +141,15 @@ func (g *Game) loadRegion(n int) error {
 	log.Printf("region %d: %d floor cells, %d object instances, %d colliders, %d grid buckets",
 		n, len(g.cells), len(g.insts), len(g.colliders), len(g.colliderGrid))
 	return nil
+}
+
+func objectInteractionFlags(cat *objects.Object, collideType int16) (interactive, toggleCollider bool) {
+	if cat != nil && cat.HasSB(objects.SBUseClass) {
+		interactive = true
+	}
+	if collideType == 2 && (cat == nil || !cat.HasSB(objects.SBLightBlocker)) {
+		interactive = true
+		toggleCollider = true
+	}
+	return interactive, toggleCollider
 }
