@@ -44,7 +44,7 @@ jobs:
       NAME: opendivine-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.ext }}
     steps:
       - name: Check out repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
       - name: Build binary
         run: |
@@ -59,14 +59,14 @@ jobs:
           done
 
       - name: Attest build provenance
-        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
         with:
           subject-path: _build/${{ env.NAME }}
           predicate-type: https://slsa.dev/provenance/v0.2
           predicate-path: _build/${{ env.NAME }}.provenance.json
 
       - name: Attest SBOM
-        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
         with:
           subject-path: _build/${{ env.NAME }}
           predicate-type: https://spdx.dev/Document
