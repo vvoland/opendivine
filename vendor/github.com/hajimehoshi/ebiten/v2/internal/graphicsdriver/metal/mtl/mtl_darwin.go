@@ -26,6 +26,7 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
+	"structs"
 	"unsafe"
 
 	"github.com/ebitengine/purego"
@@ -444,6 +445,7 @@ type RenderPassAttachmentDescriptor struct {
 //
 // Reference: https://developer.apple.com/documentation/metal/mtlclearcolor?language=objc.
 type ClearColor struct {
+	_                       structs.HostLayout
 	Red, Green, Blue, Alpha float64
 }
 
@@ -545,7 +547,7 @@ var (
 	sel_setVertexBytes_length_atIndex                                                                                                 = objc.RegisterName("setVertexBytes:length:atIndex:")
 	sel_setFragmentBytes_length_atIndex                                                                                               = objc.RegisterName("setFragmentBytes:length:atIndex:")
 	sel_setFragmentTexture_atIndex                                                                                                    = objc.RegisterName("setFragmentTexture:atIndex:")
-	sel_setBlendColorRedGreenBlueAlpha                                                                                                = objc.RegisterName("setBlendColorRed:green:blue:alpha:")
+	sel_setBlendColorRed_green_blue_alpha                                                                                             = objc.RegisterName("setBlendColorRed:green:blue:alpha:")
 	sel_setDepthStencilState                                                                                                          = objc.RegisterName("setDepthStencilState:")
 	sel_drawPrimitives_vertexStart_vertexCount                                                                                        = objc.RegisterName("drawPrimitives:vertexStart:vertexCount:")
 	sel_drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset                                                      = objc.RegisterName("drawIndexedPrimitives:indexCount:indexType:indexBuffer:indexBufferOffset:")
@@ -637,10 +639,13 @@ func (d Device) NewCommandQueue() CommandQueue {
 //
 // Reference: https://developer.apple.com/documentation/metal/mtldevice/1433431-newlibrarywithsource?language=objc.
 func (d Device) NewLibraryWithSource(source string, opt CompileOptions) (Library, error) {
+	s := cocoa.NSString_alloc().InitWithUTF8String(source)
+	defer s.ID.Send(sel_release)
+
 	var err cocoa.NSError
 	l := d.device.Send(
 		sel_newLibraryWithSource_options_error,
-		cocoa.NSString_alloc().InitWithUTF8String(source).ID,
+		s.ID,
 		0,
 		unsafe.Pointer(&err),
 	)
@@ -943,7 +948,7 @@ func (rce RenderCommandEncoder) SetFragmentTexture(texture Texture, index int) {
 }
 
 func (rce RenderCommandEncoder) SetBlendColor(red, green, blue, alpha float32) {
-	rce.commandEncoder.Send(sel_setBlendColorRedGreenBlueAlpha, red, green, blue, alpha)
+	rce.commandEncoder.Send(sel_setBlendColorRed_green_blue_alpha, red, green, blue, alpha)
 }
 
 // SetDepthStencilState sets the depth and stencil test state.
@@ -1003,20 +1008,8 @@ func (bce BlitCommandEncoder) SynchronizeTexture(texture Texture, slice int, lev
 //
 // Reference: https://developer.apple.com/documentation/metal/mtlblitcommandencoder/1400754-copyfromtexture?language=objc.
 func (bce BlitCommandEncoder) CopyFromTexture(sourceTexture Texture, sourceSlice int, sourceLevel int, sourceOrigin Origin, sourceSize Size, destinationTexture Texture, destinationSlice int, destinationLevel int, destinationOrigin Origin) {
-	// copyFromTexture requires so many arguments that Send doesn't work (#3135).
-	inv := cocoa.NSInvocation_invocationWithMethodSignature(cocoa.NSMethodSignature_signatureWithObjCTypes("v@:@QQ{MTLOrigin=qqq}{MTLSize=qqq}@QQ{MTLOrigin=qqq}"))
-	inv.SetTarget(bce.commandEncoder)
-	inv.SetSelector(sel_copyFromTexture_sourceSlice_sourceLevel_sourceOrigin_sourceSize_toTexture_destinationSlice_destinationLevel_destinationOrigin)
-	inv.SetArgumentAtIndex(unsafe.Pointer(&sourceTexture), 2)
-	inv.SetArgumentAtIndex(unsafe.Pointer(&sourceSlice), 3)
-	inv.SetArgumentAtIndex(unsafe.Pointer(&sourceLevel), 4)
-	inv.SetArgumentAtIndex(unsafe.Pointer(&sourceOrigin), 5)
-	inv.SetArgumentAtIndex(unsafe.Pointer(&sourceSize), 6)
-	inv.SetArgumentAtIndex(unsafe.Pointer(&destinationTexture), 7)
-	inv.SetArgumentAtIndex(unsafe.Pointer(&destinationSlice), 8)
-	inv.SetArgumentAtIndex(unsafe.Pointer(&destinationLevel), 9)
-	inv.SetArgumentAtIndex(unsafe.Pointer(&destinationOrigin), 10)
-	inv.Invoke()
+	bce.commandEncoder.Send(sel_copyFromTexture_sourceSlice_sourceLevel_sourceOrigin_sourceSize_toTexture_destinationSlice_destinationLevel_destinationOrigin,
+		sourceTexture, sourceSlice, sourceLevel, sourceOrigin, sourceSize, destinationTexture, destinationSlice, destinationLevel, destinationOrigin)
 }
 
 // Library is a collection of compiled graphics or compute functions.
@@ -1030,9 +1023,10 @@ type Library struct {
 //
 // Reference: https://developer.apple.com/documentation/metal/mtllibrary/1515524-newfunctionwithname?language=objc.
 func (l Library) NewFunctionWithName(name string) (Function, error) {
-	f := l.library.Send(sel_newFunctionWithName,
-		cocoa.NSString_alloc().InitWithUTF8String(name).ID,
-	)
+	n := cocoa.NSString_alloc().InitWithUTF8String(name)
+	defer n.ID.Send(sel_release)
+
+	f := l.library.Send(sel_newFunctionWithName, n.ID)
 	if f == 0 {
 		return Function{}, fmt.Errorf("function %q not found", name)
 	}
@@ -1065,19 +1059,45 @@ func (t Texture) Release() {
 	t.texture.Send(sel_release)
 }
 
-// GetBytes copies a block of pixels from the storage allocation of texture
-// slice zero into system memory at a specified address.
+// checkPixelsForTransfer returns an error unless pixels is large enough for transferring region with bytesPerRow.
 //
-// Reference: https://developer.apple.com/documentation/metal/mtltexture/1515751-getbytes?language=objc.
-func (t Texture) GetBytes(pixelBytes *byte, bytesPerRow uintptr, region Region, level int) {
-	t.texture.Send(sel_getBytes_bytesPerRow_fromRegion_mipmapLevel, pixelBytes, bytesPerRow, region, level)
+// The underlying selectors are the convenience forms without a slice or a bytes-per-image argument, so a
+// transfer always covers region.Size.Height rows of bytesPerRow bytes in slice 0, and the region must be 2D.
+func checkPixelsForTransfer(pixels []byte, bytesPerRow int, region Region, funcName string) error {
+	if region.Size.Depth != 1 {
+		return fmt.Errorf("mtl: region depth must be 1 but was %d at %s", region.Size.Depth, funcName)
+	}
+	if want := region.Size.Height * bytesPerRow; len(pixels) < want {
+		return fmt.Errorf("mtl: len(pixels) must be at least %d but was %d at %s", want, len(pixels), funcName)
+	}
+	return nil
 }
 
-// ReplaceRegion copies a block of pixels from the caller's pointer into the storage allocation for slice 0 of a texture.
+// GetBytes copies a block of pixels from the storage allocation of texture
+// slice zero into pixels.
+//
+// GetBytes returns an error if len(pixels) is less than region.Size.Height * bytesPerRow.
+//
+// Reference: https://developer.apple.com/documentation/metal/mtltexture/1515751-getbytes?language=objc.
+func (t Texture) GetBytes(pixels []byte, bytesPerRow int, region Region, level int) error {
+	if err := checkPixelsForTransfer(pixels, bytesPerRow, region, "GetBytes"); err != nil {
+		return err
+	}
+	t.texture.Send(sel_getBytes_bytesPerRow_fromRegion_mipmapLevel, &pixels[0], uintptr(bytesPerRow), region, level)
+	return nil
+}
+
+// ReplaceRegion copies a block of pixels from pixels into the storage allocation for slice 0 of a texture.
+//
+// ReplaceRegion returns an error if len(pixels) is less than region.Size.Height * bytesPerRow.
 //
 // Reference: https://developer.apple.com/documentation/metal/mtltexture/1515464-replaceregion?language=objc.
-func (t Texture) ReplaceRegion(region Region, level int, pixelBytes unsafe.Pointer, bytesPerRow int) {
-	t.texture.Send(sel_replaceRegion_mipmapLevel_withBytes_bytesPerRow, region, level, pixelBytes, bytesPerRow)
+func (t Texture) ReplaceRegion(region Region, level int, pixels []byte, bytesPerRow int) error {
+	if err := checkPixelsForTransfer(pixels, bytesPerRow, region, "ReplaceRegion"); err != nil {
+		return err
+	}
+	t.texture.Send(sel_replaceRegion_mipmapLevel_withBytes_bytesPerRow, region, level, unsafe.Pointer(&pixels[0]), bytesPerRow)
+	return nil
 }
 
 // Width is the width of the texture image for the base level mipmap, in pixels.
@@ -1158,6 +1178,7 @@ func (r RenderPipelineState) Release() {
 //
 // Reference: https://developer.apple.com/documentation/metal/mtlregion?language=objc.
 type Region struct {
+	_      structs.HostLayout
 	Origin Origin // The location of the upper-left corner of the block.
 	Size   Size   // The size of the block.
 }
@@ -1167,6 +1188,7 @@ type Region struct {
 //
 // Reference: https://developer.apple.com/documentation/metal/mtlorigin?language=objc.
 type Origin struct {
+	_ structs.HostLayout
 	X int
 	Y int
 	Z int
@@ -1177,6 +1199,7 @@ type Origin struct {
 //
 // Reference: https://developer.apple.com/documentation/metal/mtlsize?language=objc.
 type Size struct {
+	_      structs.HostLayout
 	Width  int
 	Height int
 	Depth  int
@@ -1196,6 +1219,7 @@ func RegionMake2D(x, y, width, height int) Region {
 //
 // Reference: https://developer.apple.com/documentation/metal/mtlviewport?language=objc.
 type Viewport struct {
+	_       structs.HostLayout
 	OriginX float64
 	OriginY float64
 	Width   float64
@@ -1208,6 +1232,7 @@ type Viewport struct {
 //
 // Reference: https://developer.apple.com/documentation/metal/mtlscissorrect?language=objc.
 type ScissorRect struct {
+	_      structs.HostLayout
 	X      int
 	Y      int
 	Width  int

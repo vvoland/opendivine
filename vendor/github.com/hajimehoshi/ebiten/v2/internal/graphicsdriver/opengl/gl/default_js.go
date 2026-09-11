@@ -55,6 +55,7 @@ type defaultContext struct {
 	fnDrawElements             js.Value
 	fnEnable                   js.Value
 	fnEnableVertexAttribArray  js.Value
+	fnFinish                   js.Value
 	fnFramebufferRenderbuffer  js.Value
 	fnFramebufferTexture2D     js.Value
 	fnFlush                    js.Value
@@ -66,7 +67,9 @@ type defaultContext struct {
 	fnGetShaderInfoLog         js.Value
 	fnGetShaderParameter       js.Value
 	fnGetUniformLocation       js.Value
+	fnIsBuffer                 js.Value
 	fnIsProgram                js.Value
+	fnIsVertexArray            js.Value
 	fnLinkProgram              js.Value
 	fnPixelStorei              js.Value
 	fnReadPixels               js.Value
@@ -95,14 +98,21 @@ type defaultContext struct {
 	fnVertexAttribPointer      js.Value
 	fnViewport                 js.Value
 
-	buffers          values
-	framebuffers     values
-	programs         values
-	renderbuffers    values
-	shaders          values
-	textures         values
-	vertexArrays     values
-	uniformLocations map[uint32]*values
+	buffers       values
+	framebuffers  values
+	programs      values
+	renderbuffers values
+	shaders       values
+	textures      values
+	vertexArrays  values
+
+	// uniformLocations maps a location ID to a WebGLUniformLocation.
+	uniformLocations map[int32]js.Value
+
+	// programUniformLocations maps a program ID to the location IDs the program owns.
+	programUniformLocations map[uint32][]int32
+
+	lastUniformLocationID int32
 }
 
 type values struct {
@@ -131,14 +141,6 @@ func (v *values) getID(value js.Value) (uint32, bool) {
 		}
 	}
 	return 0, false
-}
-
-func (v *values) getOrCreate(value js.Value) uint32 {
-	id, ok := v.getID(value)
-	if ok {
-		return id
-	}
-	return v.create(value)
 }
 
 func (v *values) delete(id uint32) {
@@ -184,6 +186,7 @@ func NewDefaultContext(v js.Value) (Context, error) {
 		fnDrawElements:             v.Get("drawElements").Call("bind", v),
 		fnEnable:                   v.Get("enable").Call("bind", v),
 		fnEnableVertexAttribArray:  v.Get("enableVertexAttribArray").Call("bind", v),
+		fnFinish:                   v.Get("finish").Call("bind", v),
 		fnFramebufferRenderbuffer:  v.Get("framebufferRenderbuffer").Call("bind", v),
 		fnFramebufferTexture2D:     v.Get("framebufferTexture2D").Call("bind", v),
 		fnFlush:                    v.Get("flush").Call("bind", v),
@@ -195,7 +198,9 @@ func NewDefaultContext(v js.Value) (Context, error) {
 		fnGetShaderInfoLog:         v.Get("getShaderInfoLog").Call("bind", v),
 		fnGetShaderParameter:       v.Get("getShaderParameter").Call("bind", v),
 		fnGetUniformLocation:       v.Get("getUniformLocation").Call("bind", v),
+		fnIsBuffer:                 v.Get("isBuffer").Call("bind", v),
 		fnIsProgram:                v.Get("isProgram").Call("bind", v),
+		fnIsVertexArray:            v.Get("isVertexArray").Call("bind", v),
 		fnLinkProgram:              v.Get("linkProgram").Call("bind", v),
 		fnPixelStorei:              v.Get("pixelStorei").Call("bind", v),
 		fnReadPixels:               v.Get("readPixels").Call("bind", v),
@@ -229,8 +234,7 @@ func NewDefaultContext(v js.Value) (Context, error) {
 }
 
 func (c *defaultContext) getUniformLocation(location int32) js.Value {
-	program := uint32(location) >> 5
-	return c.uniformLocations[program].get(uint32(location) & ((1 << 5) - 1))
+	return c.uniformLocations[location]
 }
 
 func (c *defaultContext) LoadFunctions() error {
@@ -337,7 +341,11 @@ func (c *defaultContext) CreateVertexArray() uint32 {
 }
 
 func (c *defaultContext) DeleteBuffer(buffer uint32) {
-	c.fnDeleteBuffer.Invoke(c.buffers.get(buffer))
+	// A buffer is already detached from the context after a context loss (at least on Chrome) and
+	// must not be deleted, but its ID must be released anyway.
+	if v := c.buffers.get(buffer); c.fnIsBuffer.Invoke(v).Bool() {
+		c.fnDeleteBuffer.Invoke(v)
+	}
 	c.buffers.delete(buffer)
 }
 
@@ -347,9 +355,16 @@ func (c *defaultContext) DeleteFramebuffer(framebuffer uint32) {
 }
 
 func (c *defaultContext) DeleteProgram(program uint32) {
-	c.fnDeleteProgram.Invoke(c.programs.get(program))
+	// A program is no longer valid after a context loss and must not be deleted, but its ID and
+	// the IDs of its uniform locations must be released anyway.
+	if v := c.programs.get(program); c.fnIsProgram.Invoke(v).Bool() {
+		c.fnDeleteProgram.Invoke(v)
+	}
 	c.programs.delete(program)
-	delete(c.uniformLocations, program)
+	for _, id := range c.programUniformLocations[program] {
+		delete(c.uniformLocations, id)
+	}
+	delete(c.programUniformLocations, program)
 }
 
 func (c *defaultContext) DeleteRenderbuffer(renderbuffer uint32) {
@@ -368,7 +383,11 @@ func (c *defaultContext) DeleteTexture(texture uint32) {
 }
 
 func (c *defaultContext) DeleteVertexArray(array uint32) {
-	c.fnDeleteVertexArray.Invoke(c.vertexArrays.get(array))
+	// A vertex array is already detached from the context after a context loss and must not be
+	// deleted, but its ID must be released anyway.
+	if v := c.vertexArrays.get(array); c.fnIsVertexArray.Invoke(v).Bool() {
+		c.fnDeleteVertexArray.Invoke(v)
+	}
 	c.vertexArrays.delete(array)
 }
 
@@ -390,6 +409,10 @@ func (c *defaultContext) Enable(cap uint32) {
 
 func (c *defaultContext) EnableVertexAttribArray(index uint32) {
 	c.fnEnableVertexAttribArray.Invoke(index)
+}
+
+func (c *defaultContext) Finish() {
+	c.fnFinish.Invoke()
 }
 
 func (c *defaultContext) Flush() {
@@ -473,16 +496,21 @@ func (c *defaultContext) GetShaderi(shader uint32, pname uint32) int {
 
 func (c *defaultContext) GetUniformLocation(program uint32, name string) int32 {
 	location := c.fnGetUniformLocation.Invoke(c.programs.get(program), name)
+
+	// A location ID must be unique in the whole context, not only in the program, as Uniform*
+	// functions take a location ID without a program.
+	c.lastUniformLocationID++
+	id := c.lastUniformLocationID
+
 	if c.uniformLocations == nil {
-		c.uniformLocations = map[uint32]*values{}
+		c.uniformLocations = map[int32]js.Value{}
 	}
-	vs, ok := c.uniformLocations[program]
-	if !ok {
-		vs = &values{}
-		c.uniformLocations[program] = vs
+	c.uniformLocations[id] = location
+	if c.programUniformLocations == nil {
+		c.programUniformLocations = map[uint32][]int32{}
 	}
-	idx := vs.getOrCreate(location)
-	return int32((program << 5) | idx)
+	c.programUniformLocations[program] = append(c.programUniformLocations[program], id)
+	return id
 }
 
 func (c *defaultContext) IsProgram(program uint32) bool {

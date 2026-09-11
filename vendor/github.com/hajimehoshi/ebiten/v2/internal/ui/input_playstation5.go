@@ -20,7 +20,7 @@ import (
 	"github.com/hajimehoshi/ebiten/v2/internal/gamepad"
 )
 
-func (u *UserInterface) updateInputStateForFrame() error {
+func (u *UserInterface) updateInputStateForFrame(deviceScaleFactor float64) error {
 	var err error
 	u.mainThread.Call(func() {
 		err = u.updateInputStateForFrameImpl()
@@ -30,7 +30,7 @@ func (u *UserInterface) updateInputStateForFrame() error {
 
 // updateInputStateForFrameImpl must be called from the main thread.
 func (u *UserInterface) updateInputStateForFrameImpl() error {
-	if err := gamepad.Update(); err != nil {
+	if err := gamepad.Update(0, nil); err != nil {
 		return err
 	}
 	return nil

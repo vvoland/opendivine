@@ -34,6 +34,10 @@ func canTruncateToFloat(v gconstant.Value) bool {
 	return gconstant.ToFloat(v).Kind() != gconstant.Unknown
 }
 
+// maxConstShift bounds constant shifts so that folding cannot allocate an
+// enormous number (e.g. 1<<(1<<40)) and exhaust memory.
+const maxConstShift = 1 << 16
+
 var textureVariableRe = regexp.MustCompile(`\A__t(\d+)\z`)
 
 func (cs *compileState) parseExpr(block *block, fname string, expr ast.Expr, markLocalVariableUsed bool) ([]shaderir.Expr, []shaderir.Type, []shaderir.Stmt, bool) {
@@ -63,7 +67,7 @@ func (cs *compileState) parseExpr(block *block, fname string, expr ast.Expr, mar
 	case *ast.BinaryExpr:
 		var stmts []shaderir.Stmt
 
-		// Prase LHS first for the order of the statements.
+		// Parse LHS first for the order of the statements.
 		lhs, ts, ss, ok := cs.parseExpr(block, fname, e.X, markLocalVariableUsed)
 		if !ok {
 			return nil, nil, nil, false
@@ -163,8 +167,20 @@ func (cs *compileState) parseExpr(block *block, fname string, expr ast.Expr, mar
 					cs.addError(e.Pos(), fmt.Sprintf("unexpected %s type for: %s", rhs[0].Const.String(), e.Op))
 					return nil, nil, nil, false
 				}
+				if shift < 0 {
+					cs.addError(e.Pos(), fmt.Sprintf("negative shift count: %s", rhs[0].Const.String()))
+					return nil, nil, nil, false
+				}
+				if shift > maxConstShift {
+					cs.addError(e.Pos(), fmt.Sprintf("shift count too large: %s", rhs[0].Const.String()))
+					return nil, nil, nil, false
+				}
 				v = gconstant.Shift(lhs[0].Const, op, uint(shift))
 			default:
+				if (op == token.QUO || op == token.QUO_ASSIGN || op == token.REM) && gconstant.Sign(rhs[0].Const) == 0 {
+					cs.addError(e.Pos(), "division by zero")
+					return nil, nil, nil, false
+				}
 				v = gconstant.BinaryOp(lhs[0].Const, op, rhs[0].Const)
 			}
 
@@ -797,7 +813,7 @@ func (cs *compileState) parseExpr(block *block, fname string, expr ast.Expr, mar
 					}
 				case shaderir.Abs, shaderir.Sign:
 					if argts[0].Main != shaderir.Float && !argts[0].IsFloatVector() && argts[0].Main != shaderir.Int && !argts[0].IsIntVector() {
-						cs.addError(e.Pos(), fmt.Sprintf("cannot use %s as float, vecN, int, or ivenN value in argument to %s", argts[0].String(), callee.BuiltinFunc))
+						cs.addError(e.Pos(), fmt.Sprintf("cannot use %s as float, vecN, int, or ivecN value in argument to %s", argts[0].String(), callee.BuiltinFunc))
 						return nil, nil, nil, false
 					}
 				default:
@@ -1057,6 +1073,20 @@ func (cs *compileState) parseExpr(block *block, fname string, expr ast.Expr, mar
 		}
 
 		if exprs[0].Const != nil {
+			// go/constant.UnaryOp panics when the operator is not defined on the constant's kind.
+			var valid bool
+			switch e.Op {
+			case token.ADD, token.SUB:
+				valid = exprs[0].Const.Kind() == gconstant.Int || exprs[0].Const.Kind() == gconstant.Float
+			case token.NOT:
+				valid = exprs[0].Const.Kind() == gconstant.Bool
+			case token.XOR:
+				valid = exprs[0].Const.Kind() == gconstant.Int
+			}
+			if !valid {
+				cs.addError(e.Pos(), fmt.Sprintf("invalid operation: operator %s not defined on %s", e.Op, exprs[0].Const.String()))
+				return nil, nil, nil, false
+			}
 			v := gconstant.UnaryOp(e.Op, exprs[0].Const, 0)
 			// Use the original type as it is.
 			// Keep the type untyped if the original expression is untyped (#2705).
@@ -1076,6 +1106,12 @@ func (cs *compileState) parseExpr(block *block, fname string, expr ast.Expr, mar
 			op = shaderir.Sub
 		case token.NOT:
 			op = shaderir.NotOp
+		case token.XOR:
+			if ts[0].Main != shaderir.Int && !ts[0].IsIntVector() {
+				cs.addError(e.Pos(), fmt.Sprintf("invalid operation: operator %s not defined on %s", e.Op, ts[0].String()))
+				return nil, nil, nil, false
+			}
+			op = shaderir.ComplementOp
 		default:
 			cs.addError(e.Pos(), fmt.Sprintf("unexpected operator: %s", e.Op))
 			return nil, nil, nil, false

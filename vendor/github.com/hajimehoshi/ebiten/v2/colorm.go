@@ -122,7 +122,7 @@ func (c *ColorM) RotateHue(theta float64) {
 // saturationScale is a value to scale saturation.
 // valueScale is a value to scale value (a.k.a. brightness).
 //
-// This conversion uses RGB to/from YCrCb conversion.
+// This conversion uses RGB to/from YCbCr conversion.
 //
 // Deprecated: as of v2.5. Use the colorm package instead.
 func (c *ColorM) ChangeHSV(hueTheta float64, saturationScale float64, valueScale float64) {
@@ -131,15 +131,27 @@ func (c *ColorM) ChangeHSV(hueTheta float64, saturationScale float64, valueScale
 
 // Element returns a value of a matrix at (i, j).
 //
+// i must be in the range [0, ColorMDim-2] and j must be in the range [0, ColorMDim-1].
+// Otherwise, Element panics.
+//
 // Deprecated: as of v2.5. Use the colorm package instead.
 func (c *ColorM) Element(i, j int) float64 {
+	if i < 0 || ColorMDim-1 <= i || j < 0 || ColorMDim <= j {
+		panic("ebiten: i or j is out of index")
+	}
 	return float64(c.affineColorM().At(i, j))
 }
 
 // SetElement sets an element at (i, j).
 //
+// i must be in the range [0, ColorMDim-2] and j must be in the range [0, ColorMDim-1].
+// Otherwise, SetElement panics.
+//
 // Deprecated: as of v2.5. Use the colorm package instead.
 func (c *ColorM) SetElement(i, j int, element float64) {
+	if i < 0 || ColorMDim-1 <= i || j < 0 || ColorMDim <= j {
+		panic("ebiten: i or j is out of index")
+	}
 	c.impl = affine.ColorMSetElement(c.affineColorM(), i, j, float32(element))
 }
 

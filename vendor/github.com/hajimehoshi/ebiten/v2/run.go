@@ -19,17 +19,18 @@ import (
 	"image"
 	"image/color"
 	"io/fs"
+	"runtime"
 	"sync/atomic"
 
 	"github.com/hajimehoshi/ebiten/v2/internal/clock"
-	"github.com/hajimehoshi/ebiten/v2/internal/graphicsdriver"
+	ecolor "github.com/hajimehoshi/ebiten/v2/internal/color"
 	"github.com/hajimehoshi/ebiten/v2/internal/inputstate"
 	"github.com/hajimehoshi/ebiten/v2/internal/ui"
 )
 
 // Game defines necessary functions for a game.
 type Game interface {
-	// Update updates a game by one tick. The given argument represents a screen image.
+	// Update updates a game by one tick.
 	//
 	// Update updates only the game logic and Draw draws the screen.
 	//
@@ -94,10 +95,12 @@ type LayoutFer interface {
 	//
 	// If the game implements this interface, Layout is never called and LayoutF is called instead.
 	//
+	// If LayoutF returns non-positive numbers, the caller may panic.
+	//
 	// LayoutF accepts a native outside size in device-independent pixels and returns the game's logical screen
 	// size in pixels. The logical size is used for 1) the screen size given at Draw and 2) calculation of the
-	// scale from the screen to the final screen size. For 1), the actual screen size is a rounded up of the
-	// logical size.
+	// scale from the screen to the final screen size. For 1), the actual screen size is the logical size
+	// rounded up.
 	LayoutF(outsideWidth, outsideHeight float64) (screenWidth, screenHeight float64)
 }
 
@@ -141,7 +144,7 @@ const DefaultTPS = clock.DefaultTPS
 // how many swapping buffer happens per second.
 //
 // On some environments, ActualFPS doesn't return a reliable value since vsync doesn't work well there.
-// If you want to measure the application's speed, Use ActualTPS.
+// If you want to measure the application's speed, use ActualTPS.
 //
 // This value is for measurement and/or debug, and your game logic should not rely on this value.
 //
@@ -170,7 +173,7 @@ func SetScreenClearedEveryFrame(cleared bool) {
 	ui.Get().SetScreenClearedEveryFrame(cleared)
 }
 
-// IsScreenClearedEveryFrame returns true if the frame isn't cleared at the beginning.
+// IsScreenClearedEveryFrame returns true if the screen is cleared at the beginning of each frame.
 //
 // IsScreenClearedEveryFrame is concurrent-safe.
 func IsScreenClearedEveryFrame() bool {
@@ -267,7 +270,7 @@ type RunGameOptions struct {
 	// SingleThread indicates whether the single thread mode is used explicitly or not.
 	// The single thread mode disables Ebitengine's thread safety to unlock maximum performance.
 	// If you use this you will have to manage threads yourself.
-	// Functions like `SetWindowSize` will no longer be concurrent-safe with this build tag.
+	// Functions like `SetWindowSize` will no longer be concurrent-safe in the single thread mode.
 	// They must be called from the main thread or the same goroutine as the given game's callback functions like Update.
 	//
 	// SingleThread works only with desktops and consoles.
@@ -280,7 +283,7 @@ type RunGameOptions struct {
 
 	// DisableHiDPI indicates whether the rendering for HiDPI is disabled or not.
 	// If HiDPI is disabled, the device scale factor is always 1 i.e. Monitor's DeviceScaleFactor always returns 1.
-	// This is useful to get a better performance on HiDPI displays, in the expense of rendering quality.
+	// This is useful to get a better performance on HiDPI displays, at the expense of rendering quality.
 	//
 	// DisableHiDPI is available only on browsers.
 	//
@@ -311,6 +314,21 @@ type RunGameOptions struct {
 
 	// X11InstanceName is an instance name in the ICCCM WM_CLASS window property.
 	X11InstanceName string
+
+	// VMGuestEndpoint is the endpoint URL of a virtualization host, like unix:///path/to/socket or
+	// tcp://host:port. If it is not empty, the game runs as a virtualization guest of that host
+	// instead of opening a window. When VMGuestEndpoint is empty and the binary is built with the
+	// `ebitenginevmguest` build tag, the environment variable EBITENGINE_VM_ENDPOINT is used instead.
+	//
+	// When the game runs as a virtualization guest, GraphicsLibrary is ignored, and the graphics
+	// library is always GraphicsLibraryRemote. ColorSpace is also ignored: the color space is
+	// determined by the host. The game's audio is not played on a local audio device: it is
+	// forwarded to the host.
+	//
+	// VMGuestEndpoint is available only on desktops.
+	//
+	// The default (zero) value is an empty string, which means that the game runs normally.
+	VMGuestEndpoint string
 }
 
 // RunGameWithOptions starts the main loop and runs the game with the specified options.
@@ -349,9 +367,12 @@ type RunGameOptions struct {
 func RunGameWithOptions(game Game, options *RunGameOptions) error {
 	defer isRunGameEnded_.Store(true)
 
-	initializeWindowPositionIfNeeded(WindowSize())
-
 	op := toUIRunOptions(options)
+	ww, wh := WindowSize()
+	op.InitWindowWidthInDIP = ww
+	op.InitWindowHeightInDIP = wh
+	op.WindowPositionSet = windowPositionSetExplicitly.Load()
+
 	// This is necessary to change the result of IsScreenTransparent.
 	screenTransparent.Store(op.ScreenTransparent)
 	g := newGameForUI(game, op.ScreenTransparent)
@@ -370,9 +391,22 @@ func isRunGameEnded() bool {
 	return isRunGameEnded_.Load()
 }
 
+// ScreenSize returns the size of the image given at [Game.Draw], in pixels.
+//
+// ScreenSize returns (0, 0) before the game starts.
+//
+// ScreenSize is concurrent-safe.
+func ScreenSize() (int, int) {
+	s := screenSize.Load()
+	if s == nil {
+		return 0, 0
+	}
+	return s.X, s.Y
+}
+
 // ScreenSizeInFullscreen returns the size in device-independent pixels when the game is fullscreen.
 // The adopted monitor is the 'current' monitor which the window belongs to.
-// The returned value can be given to SetSize function if the perfectly fit fullscreen is needed.
+// The returned value can be given to [SetWindowSize] if the perfectly fit fullscreen is needed.
 //
 // On browsers, ScreenSizeInFullscreen returns the 'window' (global object) size, not 'screen' size.
 // ScreenSizeInFullscreen's returning value is different from the actual screen size and this is a known issue (#2145).
@@ -414,7 +448,7 @@ func CursorMode() CursorModeType {
 //
 // On browsers, capturing a cursor requires a user gesture, otherwise SetCursorMode does nothing but leave an error message in console.
 // This behavior varies across browser implementations.
-// Check for user interaction before calling capturing a cursor e.g. by IsMouseButtonPressed or IsKeyPressed.
+// Check for user interaction before capturing a cursor e.g. by IsMouseButtonPressed or IsKeyPressed.
 //
 // SetCursorMode does nothing on mobiles.
 //
@@ -457,8 +491,6 @@ func SetFullscreen(fullscreen bool) {
 // IsFocused returns a boolean value indicating whether
 // the game is in focus or in the foreground.
 //
-// IsFocused will only return true if IsRunnableOnUnfocused is false.
-//
 // IsFocused is concurrent-safe.
 func IsFocused() bool {
 	return ui.Get().IsFocused()
@@ -476,6 +508,9 @@ func IsRunnableOnUnfocused() bool {
 //
 // If the given value is true, the game runs even in background e.g. when losing focus.
 // The initial state is true.
+//
+// Even when the given value is false, the game keeps running while the window is hidden by
+// [SetWindowVisible], since a hidden window can never be focused and would otherwise never run again.
 //
 // Known issue: On browsers, even if the state is on, the game doesn't run in background tabs.
 // This is because browsers throttles background tabs not to often update.
@@ -502,7 +537,11 @@ func SetRunnableOnUnfocused(runnableOnUnfocused bool) {
 //
 // Deprecated: as of v2.6. Use Monitor().DeviceScaleFactor() instead.
 func DeviceScaleFactor() float64 {
-	return Monitor().DeviceScaleFactor()
+	m := Monitor()
+	if m == nil {
+		return 1
+	}
+	return m.DeviceScaleFactor()
 }
 
 // IsVsyncEnabled returns a boolean value indicating whether
@@ -661,7 +700,8 @@ func IsScreenTransparent() bool {
 
 // SetScreenTransparent sets the state if the window is transparent.
 //
-// SetScreenTransparent panics if SetScreenTransparent is called after the main loop.
+// If SetScreenTransparent is called after the main loop starts, the window is not made transparent,
+// but [IsScreenTransparent] returns the given value.
 //
 // SetScreenTransparent does nothing on mobiles.
 //
@@ -679,7 +719,7 @@ var screenTransparent atomic.Bool
 //
 // SetInitFocused does nothing on mobile.
 //
-// SetInitFocused panics if this is called after the main loop.
+// SetInitFocused has no effect if this is called after the main loop starts.
 //
 // SetInitFocused is concurrent-safe.
 //
@@ -696,10 +736,20 @@ func toUIRunOptions(options *RunGameOptions) *ui.RunOptions {
 		defaultX11InstanceName = "ebitengine-application"
 	)
 
+	colorSpace := ecolor.ColorSpaceSRGB
+	if options != nil && options.ColorSpace != ColorSpaceDefault {
+		colorSpace = ecolor.ColorSpace(options.ColorSpace)
+	} else if runtime.GOOS == "darwin" || runtime.GOOS == "ios" {
+		// On macOS or iOS, the default color space is Display P3.
+		// TODO: Remove this logic at v3. sRGB should be the default in the future (#3349).
+		colorSpace = ecolor.ColorSpaceDisplayP3
+	}
+
 	if options == nil {
 		return &ui.RunOptions{
 			InitUnfocused:     initUnfocused.Load(),
 			ScreenTransparent: screenTransparent.Load(),
+			ColorSpace:        colorSpace,
 			X11ClassName:      defaultX11ClassName,
 			X11InstanceName:   defaultX11InstanceName,
 		}
@@ -712,28 +762,6 @@ func toUIRunOptions(options *RunGameOptions) *ui.RunOptions {
 		options.X11InstanceName = defaultX11InstanceName
 	}
 
-	// ui.RunOptions.StrictContextRestoration is not used so far (#3098).
-	// This might be reused in the future.
-	// The original comment for StrictContextRestration is as follows:
-	//
-	// StrictContextRestration indicates whether the context lost should be restored strictly by Ebitengine or not.
-	//
-	// StrictContextRestration is available only on Android. Otherwise, StrictContextRestration is ignored.
-	// Thus, StrictContextRestration should be used with mobile.SetGameWithOptions, rather than RunGameWithOptions.
-	//
-	// In Android, Ebitengien uses `GLSurfaceView`'s `setPreserveEGLContextOnPause(true)`.
-	// This works in most cases, but it is still possible that the context is lost in some minor cases.
-	//
-	// When StrictContextRestration is true, Ebitengine tries to restore the context more strictly
-	// for such minor cases.
-	// However, this might cause a performance issue since Ebitengine tries to keep all the information
-	// to restore the context.
-	//
-	// When StrictContextRestration is false, Ebitengine does nothing special to restore the context and
-	// relies on the OS's behavior.
-	//
-	// The default (zero) value is false.
-
 	return &ui.RunOptions{
 		GraphicsLibrary:          ui.GraphicsLibrary(options.GraphicsLibrary),
 		InitUnfocused:            options.InitUnfocused,
@@ -741,10 +769,11 @@ func toUIRunOptions(options *RunGameOptions) *ui.RunOptions {
 		SkipTaskbar:              options.SkipTaskbar,
 		SingleThread:             options.SingleThread,
 		DisableHiDPI:             options.DisableHiDPI,
-		ColorSpace:               graphicsdriver.ColorSpace(options.ColorSpace),
+		ColorSpace:               colorSpace,
 		ApplePressAndHoldEnabled: options.ApplePressAndHoldEnabled,
 		X11ClassName:             options.X11ClassName,
 		X11InstanceName:          options.X11InstanceName,
+		VMGuestEndpoint:          options.VMGuestEndpoint,
 	}
 }
 
@@ -755,9 +784,20 @@ func toUIRunOptions(options *RunGameOptions) *ui.RunOptions {
 //
 // As of Ebitengine 2.9, the returned value also implements [io/fs.ReadDirFS].
 //
+// As of Ebitengine 2.10, the returned value also implements [io/fs.ReadFileFS].
+//
+// As of Ebitengine 2.10, on desktops, the directory entries and the files the returned value
+// provides also implement [AbsPather].
+//
 // DroppedFiles is concurrent-safe.
 func DroppedFiles() fs.FS {
 	return inputstate.Get().DroppedFiles()
+}
+
+// AbsPather is a directory entry or a file that has a path in the real file system.
+type AbsPather interface {
+	// AbsPath returns the absolute path in the real file system.
+	AbsPath() string
 }
 
 // Tick returns the current tick count.
@@ -766,4 +806,18 @@ func DroppedFiles() fs.FS {
 // Tick is concurrent-safe.
 func Tick() int64 {
 	return ui.Get().Tick()
+}
+
+// RunOnMainThread runs the given function on the main thread.
+// RunOnMainThread executes the function synchronously and returns after the function completes.
+//
+// If RunOnMainThread is called on the main thread, RunOnMainThread blocks forever.
+//
+// RunOnMainThread might not run the function e.g. before the game starts or after the game ends.
+//
+// RunOnMainThread is useful to access platform-specific APIs in a safe way.
+//
+// RunOnMainThread panics if the platform doesn't support it.
+func RunOnMainThread(f func()) {
+	ui.Get().RunOnMainThread(f)
 }

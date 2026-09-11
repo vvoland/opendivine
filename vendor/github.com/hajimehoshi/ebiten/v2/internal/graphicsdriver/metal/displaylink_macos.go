@@ -16,36 +16,14 @@
 
 package metal
 
-// #cgo CFLAGS: -x objective-c
-//
-// #include <Foundation/Foundation.h>
-// #include <CoreVideo/CVDisplayLink.h>
-// #if __has_include(<QuartzCore/CAMetalLayer.h>)
-//   #include <QuartzCore/CAMetalLayer.h>
-// #endif
-//
-// #cgo noescape isCAMetalDisplayLinkAvailable
-// #cgo nocallback isCAMetalDisplayLinkAvailable
-// static bool isCAMetalDisplayLinkAvailable() {
-//   // TODO: Use PureGo if returning a struct is supported (ebitengine/purego#225).
-//   // As operatingSystemVersion returns a struct, this cannot be written with PureGo.
-//   NSOperatingSystemVersion version = [[NSProcessInfo processInfo] operatingSystemVersion];
-//   if (version.majorVersion >= 14) {
-//     // Also check if the CAMetalDisplayLink class exists
-//     return NSClassFromString(@"CAMetalDisplayLink") != nil;
-//   }
-//   return false;
-// }
-//
-// int ebitengine_DisplayLinkOutputCallback(CVDisplayLinkRef displayLinkRef, CVTimeStamp* inNow, CVTimeStamp* inOutputTime, uint64_t flagsIn, uint64_t* flagsOut, void* displayLinkContext);
-import "C"
 import (
+	"fmt"
 	"log/slog"
 	"runtime"
-	"runtime/cgo"
+	"structs"
 	"time"
-	"unsafe"
 
+	"github.com/ebitengine/purego"
 	"github.com/ebitengine/purego/objc"
 
 	"github.com/hajimehoshi/ebiten/v2/internal/cocoa"
@@ -53,7 +31,7 @@ import (
 )
 
 func (v *view) initDisplayLink() error {
-	if C.isCAMetalDisplayLinkAvailable() {
+	if isCAMetalDisplayLinkAvailable() {
 		if err := v.initCAMetalDisplayLink(); err != nil {
 			return err
 		}
@@ -63,6 +41,59 @@ func (v *view) initDisplayLink() error {
 		return err
 	}
 	return nil
+}
+
+var (
+	sel_processInfo            = objc.RegisterName("processInfo")
+	sel_operatingSystemVersion = objc.RegisterName("operatingSystemVersion")
+	sel_release                = objc.RegisterName("release")
+
+	class_NSProcessInfo = objc.GetClass("NSProcessInfo")
+)
+
+type nsOperatingSystemVersion struct {
+	_            structs.HostLayout
+	majorVersion int
+	minorVersion int
+	patchVersion int
+}
+
+var nsClassFromString func(str cocoa.NSString) objc.Class
+
+var (
+	cvDisplayLinkCreateWithActiveCGDisplays func(displayLinkOut *uintptr) int32
+	cvDisplayLinkSetOutputCallback          func(displayLink uintptr, callback uintptr, userInfo uintptr) int32
+	cvDisplayLinkStart                      func(displayLink uintptr) int32
+	cvDisplayLinkStop                       func(displayLink uintptr) int32
+	cvDisplayLinkRelease                    func(displayLink uintptr)
+)
+
+func init() {
+	foundation, err := purego.Dlopen("/System/Library/Frameworks/Foundation.framework/Foundation", purego.RTLD_LAZY|purego.RTLD_GLOBAL)
+	if err != nil {
+		panic(err)
+	}
+	purego.RegisterLibFunc(&nsClassFromString, foundation, "NSClassFromString")
+
+	coreVideo, err := purego.Dlopen("/System/Library/Frameworks/CoreVideo.framework/CoreVideo", purego.RTLD_LAZY|purego.RTLD_GLOBAL)
+	if err != nil {
+		panic(err)
+	}
+	purego.RegisterLibFunc(&cvDisplayLinkCreateWithActiveCGDisplays, coreVideo, "CVDisplayLinkCreateWithActiveCGDisplays")
+	purego.RegisterLibFunc(&cvDisplayLinkSetOutputCallback, coreVideo, "CVDisplayLinkSetOutputCallback")
+	purego.RegisterLibFunc(&cvDisplayLinkStart, coreVideo, "CVDisplayLinkStart")
+	purego.RegisterLibFunc(&cvDisplayLinkStop, coreVideo, "CVDisplayLinkStop")
+	purego.RegisterLibFunc(&cvDisplayLinkRelease, coreVideo, "CVDisplayLinkRelease")
+}
+
+func isCAMetalDisplayLinkAvailable() bool {
+	version := objc.Send[nsOperatingSystemVersion](objc.ID(class_NSProcessInfo).Send(sel_processInfo), sel_operatingSystemVersion)
+	if version.majorVersion >= 14 {
+		s := cocoa.NSString_alloc().InitWithUTF8String("CAMetalDisplayLink")
+		defer s.ID.Send(sel_release)
+		return nsClassFromString(s) != 0
+	}
+	return false
 }
 
 var class_EbitengineCAMetalDisplayLinkDelegate objc.Class
@@ -88,6 +119,12 @@ func (v *view) initCAMetalDisplayLink() error {
 						slog.Debug("metal: metalDisplayLink:needsUpdate: is unexpectedly called from the main run loop")
 						return
 					}
+					// vsyncDisabled or liveResizing becomes true before the display link is invalidated
+					// (see updateMetalDisplayLink).
+					// Return without sending a drawable so that the run loop can execute the invalidation block.
+					if v.vsyncDisabled.Load() || v.liveResizing.Load() {
+						return
+					}
 					drawable := ca.MetalDisplayLinkUpdate{ID: needsUpdate}.Drawable()
 					if drawable == (ca.MetalDrawable{}) {
 						return
@@ -99,25 +136,95 @@ func (v *view) initCAMetalDisplayLink() error {
 		},
 	)
 	if err != nil {
-		return err
+		return fmt.Errorf("metal: objc.RegisterClass for EbitengineCAMetalDisplayLinkDelegate failed: %w", err)
 	}
 	class_EbitengineCAMetalDisplayLinkDelegate = c
 
-	v.createCAMetalDisplayLink()
+	v.updateMetalDisplayLink()
 
 	return nil
 }
 
-func (v *view) createCAMetalDisplayLink() {
+// updateMetalDisplayLink creates or destroys CAMetalDisplayLink for the current vsync and
+// live-resize states.
+func (v *view) updateMetalDisplayLink() {
+	// A zero run loop means CAMetalDisplayLink is not used: either the OS doesn't support it,
+	// or the display link is not initialized yet. In the latter case, initCAMetalDisplayLink
+	// calls this function after creating the run loop.
+	if v.metalDisplayLinkRunLoop.ID == 0 {
+		return
+	}
+
+	// Destroy the display link while vsync is disabled or the window is being resized.
+	// CAMetalLayer's nextDrawable is not available while CAMetalDisplayLink exists for the
+	// layer, and drawables must be obtained directly from the Metal layer in these cases
+	// (see nextDrawable):
+	//   - While vsync is disabled, getting a drawable must not wait for the display refresh.
+	//   - While the window is being resized, the display link creates a drawable before
+	//     invoking the delegate callback, so the drawable often has a stale size while the
+	//     drawable size keeps changing, and waiting for a drawable with the correct size
+	//     wastes the tight drawable pool. A drawable obtained directly from the Metal layer
+	//     always has the current drawable size (#3478).
+	if v.vsyncDisabled.Load() || v.liveResizing.Load() {
+		if v.metalDisplayLink == 0 {
+			return
+		}
+		dl := ca.MetalDisplayLink{ID: objc.ID(v.metalDisplayLink)}
+		v.metalDisplayLink = 0
+
+		// If a drawable from the display link is still in use, the delegate callback that delivered it is
+		// blocked until the drawable usage finishes. Unblock the callback. The drawable remains usable and
+		// presentable.
+		if v.drawableFromDisplayLink {
+			v.drawableFromDisplayLink = false
+			v.drawableDoneCh <- struct{}{}
+		}
+
+		done := make(chan struct{})
+		b := objc.NewBlock(func(block objc.Block) {
+			dl.Invalidate()
+			dl.Release()
+			close(done)
+		})
+		defer b.Release()
+		v.metalDisplayLinkRunLoop.PerformBlock(b)
+
+		// A delegate callback might be blocked to send a drawable, preventing the run loop from executing
+		// the block above. Receive drawables until the display link is invalidated.
+		// New delegate callbacks return without sending a drawable as vsyncDisabled or liveResizing is
+		// already true, so this loop always terminates.
+	loop:
+		for {
+			select {
+			case <-v.drawableCh:
+				v.drawableDoneCh <- struct{}{}
+			case <-done:
+				break loop
+			}
+		}
+		return
+	}
+
+	// Create the display link while vsync is enabled and the window is not being resized.
+	if v.metalDisplayLink != 0 {
+		return
+	}
+
+	if v.metalDisplayLinkDelegate == 0 {
+		v.metalDisplayLinkDelegate = objc.ID(class_EbitengineCAMetalDisplayLinkDelegate).Send(objc.RegisterName("new"))
+	}
+
 	ch := make(chan uintptr)
-	v.metalDisplayLinkRunLoop.PerformBlock(objc.NewBlock(func(block objc.Block) {
+	b := objc.NewBlock(func(block objc.Block) {
 		dl := ca.NewMetalDisplayLink(v.ml)
-		dl.SetDelegate(objc.ID(class_EbitengineCAMetalDisplayLinkDelegate).Send(objc.RegisterName("new")))
+		dl.SetDelegate(v.metalDisplayLinkDelegate)
 		dl.AddToRunLoop(v.metalDisplayLinkRunLoop, cocoa.NSDefaultRunLoopMode)
 		dl.SetPaused(false)
 		ch <- uintptr(dl.ID)
 		close(ch)
-	}))
+	})
+	defer b.Release()
+	v.metalDisplayLinkRunLoop.PerformBlock(b)
 	v.metalDisplayLink = <-ch
 }
 
@@ -145,33 +252,97 @@ func createThreadWithRunLoop() cocoa.NSRunLoop {
 	return runLoop
 }
 
+var displayLinkOutputCallbackPtr = purego.NewCallback(displayLinkOutputCallback)
+
 func (v *view) initCADisplayLink() error {
 	v.fence = newFence()
 
 	// TODO: CVDisplayLink APIs are deprecated in macOS 10.15 and later.
 	// Use new APIs like NSView.displayLink(target:selector:).
-	var displayLinkRef C.CVDisplayLinkRef
-	if ret := C.CVDisplayLinkCreateWithActiveCGDisplays(&displayLinkRef); ret != kCVReturnSuccess {
+	var displayLinkRef uintptr
+	if ret := cvDisplayLinkCreateWithActiveCGDisplays(&displayLinkRef); ret != kCVReturnSuccess {
 		// Failed to get the display link, so proceed without it.
 		return nil
 	}
-	v.handleToSelf = cgo.NewHandle(v)
-	C.CVDisplayLinkSetOutputCallback(displayLinkRef, C.CVDisplayLinkOutputCallback(C.ebitengine_DisplayLinkOutputCallback), unsafe.Pointer(&v.handleToSelf))
-	C.CVDisplayLinkStart(displayLinkRef)
+	v.handleToSelf = newViewHandle(v)
+	cvDisplayLinkSetOutputCallback(displayLinkRef, displayLinkOutputCallbackPtr, uintptr(v.handleToSelf))
+	cvDisplayLinkStart(displayLinkRef)
 
-	v.caDisplayLink = uintptr(displayLinkRef)
+	v.caDisplayLink = displayLinkRef
 	return nil
 }
 
-//export ebitengine_DisplayLinkOutputCallback
-func ebitengine_DisplayLinkOutputCallback(displayLinkRef C.CVDisplayLinkRef, inNow, inOutputTime *C.CVTimeStamp, flagsIn C.uint64_t, flagsOut *C.uint64_t, displayLinkContext unsafe.Pointer) C.int {
-	cgoHandle := (*cgo.Handle)(displayLinkContext)
-	view := cgoHandle.Value().(*view)
+// releaseDisplayLink releases the display link created at initCADisplayLink.
+func (v *view) releaseDisplayLink() {
+	if v.caDisplayLink == 0 {
+		return
+	}
+
+	// CVDisplayLinkStop returns after the output callback finishes, so the view handle is no
+	// longer used by the callback after this.
+	cvDisplayLinkStop(v.caDisplayLink)
+	cvDisplayLinkRelease(v.caDisplayLink)
+	v.caDisplayLink = 0
+
+	deleteViewHandle(v.handleToSelf)
+	v.handleToSelf = 0
+}
+
+// displayLinkOutputCallback is the callback function for CVDisplayLink.
+// The signature matches CVDisplayLinkOutputCallback:
+// CVReturn (*CVDisplayLinkOutputCallback)(CVDisplayLinkRef displayLink, const CVTimeStamp *inNow, const CVTimeStamp *inOutputTime, CVOptionFlags flagsIn, CVOptionFlags *flagsOut, void *displayLinkContext)
+func displayLinkOutputCallback(displayLink uintptr, inNow, inOutputTime uintptr, flagsIn uint64, flagsOut *uint64, displayLinkContext uintptr) int32 {
+	h := viewHandle(displayLinkContext)
+	view := h.Value()
 	view.fence.advance()
 	return 0
 }
 
+// updatePresentationState synchronizes the presentation-related states with the window.
+// This must be called at the beginning of a frame.
+func (v *view) updatePresentationState() {
+	inLiveResize := v.inLiveResize()
+	if v.liveResizing.Load() != inLiveResize {
+		v.liveResizing.Store(inLiveResize)
+		v.updateMetalDisplayLink()
+	}
+
+	// presentsWithTransaction is enabled unless vsync is disabled (#1196) or the window is in
+	// the fullscreen mode (#1745, #1974). Toggling presentsWithTransaction drops the current
+	// layer content immediately and irrecoverably, showing the window background for a moment
+	// (#3478). The property must not be toggled at the beginning of window resizing, so it is
+	// kept enabled during the entire windowed lifetime with vsync on instead.
+	//
+	// While vsync is disabled, presentsWithTransaction is enabled only during window resizing:
+	// frames are event-paced then, so the unlimited presentation rate does not matter, and the
+	// synced presentations keep the content from being distorted. The toggle at the beginning
+	// of resizing can show the window background for a moment, which is less noticeable than
+	// the content being distorted during the entire resizing.
+	presentsWithTransaction := !v.isFullscreen() && (!v.vsyncDisabled.Load() || inLiveResize)
+	if v.presentsWithTransaction != presentsWithTransaction {
+		if presentsWithTransaction {
+			// Wait until all the drawables queued for asynchronous presentation are presented.
+			// Otherwise, a pending presentation can replace the layer content after the first
+			// transaction-synced presentation, and a stale frame is shown for a moment.
+			for start := time.Now(); v.queuedPresents.Load() > 0 && time.Since(start) < 100*time.Millisecond; {
+				time.Sleep(time.Millisecond)
+			}
+		}
+		set := func() {
+			v.ml.SetPresentsWithTransaction(presentsWithTransaction)
+		}
+		if v.runOnMainThread != nil {
+			v.runOnMainThread(set)
+		} else {
+			set()
+		}
+		v.presentsWithTransaction = presentsWithTransaction
+	}
+}
+
 func (v *view) nextDrawable() ca.MetalDrawable {
+	v.applyDrawableSizeIfNeeded()
+
 	if v.metalDisplayLink != 0 {
 		const wait = 100 * time.Millisecond
 		if v.drawableTimer == nil {
@@ -180,14 +351,36 @@ func (v *view) nextDrawable() ca.MetalDrawable {
 			v.drawableTimer.Reset(wait)
 		}
 		defer v.drawableTimer.Stop()
-		select {
-		case d := <-v.drawableCh:
-			return d
-		case <-v.drawableTimer.C:
-			// This happens when the main thread needs to execute the notification observer callback,
-			// or when the appliation goes to full screen (#3354).
-			return ca.MetalDrawable{}
+		for {
+			select {
+			case d := <-v.drawableCh:
+				v.drawableFromDisplayLink = true
+				// The display link creates a drawable before invoking the delegate callback, so the
+				// drawable might have a stale size when the drawable size has just been changed e.g.
+				// by window resizing. Skip such a drawable and wait for one with the new size (#3478).
+				if v.drawableWidth != 0 && v.drawableHeight != 0 {
+					if t := d.Texture(); t.Width() != v.drawableWidth || t.Height() != v.drawableHeight {
+						v.finishDrawableUsage()
+						continue
+					}
+				}
+				return d
+			case <-v.drawableTimer.C:
+				// This happens when the main thread needs to execute the notification observer callback,
+				// or when the appliation goes to full screen (#3354).
+				return ca.MetalDrawable{}
+			}
 		}
+	}
+
+	// While vsync is disabled, getting a drawable must not block until one is available.
+	// When all the drawables but the one on the display are queued for presentation,
+	// skip the frame instead of blocking. The time condition is a fallback to keep presenting
+	// even when the tracking is stuck e.g. by a presented handler not being called.
+	if v.vsyncDisabled.Load() &&
+		v.queuedPresents.Load() >= maximumDrawableCount-1 &&
+		time.Since(v.lastPresentTime) < time.Second/4 {
+		return ca.MetalDrawable{}
 	}
 
 	v.waitForDisplayLinkOutputCallback()
@@ -201,8 +394,9 @@ func (v *view) nextDrawable() ca.MetalDrawable {
 }
 
 func (v *view) finishDrawableUsage() {
-	if v.metalDisplayLink != 0 {
-		v.drawableDoneCh <- struct{}{}
+	if !v.drawableFromDisplayLink {
 		return
 	}
+	v.drawableFromDisplayLink = false
+	v.drawableDoneCh <- struct{}{}
 }

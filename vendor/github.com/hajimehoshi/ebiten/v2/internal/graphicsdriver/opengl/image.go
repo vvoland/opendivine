@@ -28,7 +28,6 @@ type Image struct {
 	id          graphicsdriver.ImageID
 	graphics    *Graphics
 	texture     textureNative
-	stencil     renderbufferNative
 	framebuffer *framebuffer
 	width       int
 	height      int
@@ -52,9 +51,6 @@ func (i *Image) Dispose() {
 	}
 	if i.texture != 0 {
 		i.graphics.context.deleteTexture(i.texture)
-	}
-	if i.stencil != 0 {
-		i.graphics.context.deleteRenderbuffer(i.stencil)
 	}
 
 	i.graphics.removeImage(i)
@@ -109,27 +105,6 @@ func (i *Image) ensureFramebuffer() error {
 	return nil
 }
 
-func (i *Image) ensureStencilBuffer() error {
-	if i.stencil != 0 {
-		return nil
-	}
-
-	if err := i.ensureFramebuffer(); err != nil {
-		return err
-	}
-
-	r, err := i.graphics.context.newRenderbuffer(i.viewportSize())
-	if err != nil {
-		return err
-	}
-	i.stencil = r
-
-	if err := i.graphics.context.bindStencilBuffer(i.framebuffer.native, i.stencil); err != nil {
-		return err
-	}
-	return nil
-}
-
 func (i *Image) WritePixels(args []graphicsdriver.PixelsArgs) error {
 	if i.screen {
 		return errors.New("opengl: WritePixels cannot be called on the screen")
@@ -138,10 +113,13 @@ func (i *Image) WritePixels(args []graphicsdriver.PixelsArgs) error {
 		return nil
 	}
 
-	// glFlush is necessary on Android.
-	// glTexSubImage2D didn't work without this hack at least on Nexus 5x and NuAns NEO [Reloaded] (#211).
+	// Some drivers process glTexSubImage2D without waiting for pending draw commands, even though
+	// commands in a single context must be processed in order (#211, #593, #3487).
+	// Wait for completion of the pending draw commands explicitly before updating the texture.
+	// The opposite order, draw commands issued after glTexSubImage2D, does not need an explicit wait,
+	// as drivers process this ordering correctly.
 	if i.graphics.drawCalled {
-		i.graphics.context.ctx.Flush()
+		i.graphics.context.ctx.Finish()
 	}
 	i.graphics.drawCalled = false
 

@@ -22,21 +22,30 @@ package metal
 //
 // #import <UIKit/UIKit.h>
 //
+// // Core Animation allows mutation off the main thread only for a layer that is not
+// // associated with a view. The CAMetalLayer joins a UIView's layer tree at addSublayer,
+// // so both the attachment and the frame updates run on the main queue.
+//
 // #cgo noescape addSublayer
 // #cgo nocallback addSublayer
 // static void addSublayer(void* view, void* sublayer) {
-//   CALayer* layer = ((UIView*)view).layer;
-//   [layer addSublayer:(CALayer*)sublayer];
+//   // The layer was created and configured on this thread, and that state is still in
+//   // this thread's implicit transaction. Commit it first, or the layer joins the tree
+//   // unconfigured and renders nothing.
+//   [CATransaction flush];
+//   dispatch_sync(dispatch_get_main_queue(), ^{
+//     CALayer* layer = ((UIView*)view).layer;
+//     [layer addSublayer:(CALayer*)sublayer];
+//   });
 // }
 //
 // #cgo noescape setFrame
 // #cgo nocallback setFrame
 // static void setFrame(void* cametal, void* uiview) {
-//   __block CGSize size;
 //   dispatch_sync(dispatch_get_main_queue(), ^{
-//     size = ((UIView*)uiview).frame.size;
+//     CGSize size = ((UIView*)uiview).frame.size;
+//     ((CALayer*)cametal).frame = CGRectMake(0, 0, size.width, size.height);
 //   });
-//   ((CALayer*)cametal).frame = CGRectMake(0, 0, size.width, size.height);
 // }
 import "C"
 
@@ -52,17 +61,18 @@ func (v *view) setWindow(window uintptr) {
 }
 
 func (v *view) setUIView(uiview uintptr) {
-	v.uiview = uiview
+	v.uiview.Store(uiview)
 }
 
 func (v *view) update() {
+	uiview := v.uiview.Load()
 	v.once.Do(func() {
 		if v.ml.Layer() == nil {
 			panic("metal: CAMetalLayer is not initialized yet")
 		}
-		C.addSublayer(unsafe.Pointer(v.uiview), v.ml.Layer())
+		C.addSublayer(unsafe.Pointer(uiview), v.ml.Layer())
 	})
-	C.setFrame(v.ml.Layer(), unsafe.Pointer(v.uiview))
+	C.setFrame(v.ml.Layer(), unsafe.Pointer(uiview))
 }
 
 const (
@@ -83,7 +93,37 @@ func (v *view) finishDrawableUsage() {
 	// Do nothing.
 }
 
+func (v *view) setDrawableSize(width, height int) {
+	v.ml.SetDrawableSize(width, height)
+}
+
+func (v *view) updatePresentationState() {
+	// There is no user-driven window resizing on iOS, and presentsWithTransaction is always false.
+}
+
+func (v *view) shouldPresentWithTransaction() bool {
+	// There is no user-driven window resizing on iOS.
+	return false
+}
+
+func (v *view) presentDrawableWithTransaction(cb mtl.CommandBuffer, d ca.MetalDrawable) {
+	panic("metal: presentDrawableWithTransaction is not available on iOS")
+}
+
+func (v *view) presentDrawable(cb mtl.CommandBuffer, d ca.MetalDrawable) {
+	cb.PresentDrawable(d)
+}
+
+func (v *view) updateMetalDisplayLink() {
+	// Do nothing.
+}
+
 func (v *view) initializeOS() error {
 	// Do nothing.
 	return nil
+}
+
+// release releases the resources created at initialize.
+func (v *view) release() {
+	// Do nothing.
 }

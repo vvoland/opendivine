@@ -19,7 +19,6 @@ import (
 	"image/color"
 	"math"
 	"sync"
-	_ "unsafe"
 
 	"github.com/hajimehoshi/ebiten/v2"
 )
@@ -28,6 +27,16 @@ var (
 	whiteImage    = ebiten.NewImage(3, 3)
 	whiteSubImage = whiteImage.SubImage(image.Rect(1, 1, 2, 2)).(*ebiten.Image)
 )
+
+func init() {
+	b := whiteImage.Bounds()
+	pix := make([]byte, 4*b.Dx()*b.Dy())
+	for i := range pix {
+		pix[i] = 0xff
+	}
+	// This is hacky, but WritePixels is better than Fill in term of automatic texture packing.
+	whiteImage.WritePixels(pix)
+}
 
 var (
 	theCachedVerticesForUtil []ebiten.Vertex
@@ -41,20 +50,37 @@ func useCachedVerticesAndIndicesForUtil(fn func([]ebiten.Vertex, []uint32) (vs [
 	theCachedVerticesForUtil, theCachedIndicesForUtil = fn(theCachedVerticesForUtil[:0], theCachedIndicesForUtil[:0])
 }
 
-func init() {
-	b := whiteImage.Bounds()
-	pix := make([]byte, 4*b.Dx()*b.Dy())
-	for i := range pix {
-		pix[i] = 0xff
+func circleVertexCount(r float32) int {
+	const maxCircleVertexCount = 8192
+
+	if !(r > 0) || math.IsInf(float64(r), 0) {
+		return 0
 	}
-	// This is hacky, but WritePixels is better than Fill in term of automatic texture packing.
-	whiteImage.WritePixels(pix)
+
+	// At this count, the error from approximating a circle is comparable to
+	// float32 precision, so additional vertices cannot meaningfully improve it.
+	if float64(r) >= maxCircleVertexCount/math.Pi {
+		return maxCircleVertexCount
+	}
+	return int(math.Ceil(math.Pi * float64(r)))
 }
+
+var (
+	thePathPool = sync.Pool{
+		New: func() any {
+			return &Path{}
+		},
+	}
+)
 
 // StrokeLine strokes a line (x0, y0)-(x1, y1) with the specified width and color.
 func StrokeLine(dst *ebiten.Image, x0, y0, x1, y1 float32, strokeWidth float32, clr color.Color, antialias bool) {
 	if antialias {
-		var path Path
+		path := thePathPool.Get().(*Path)
+		defer func() {
+			path.Reset()
+			thePathPool.Put(path)
+		}()
 		path.MoveTo(x0, y0)
 		path.LineTo(x1, y1)
 		strokeOp := &StrokeOptions{}
@@ -62,7 +88,7 @@ func StrokeLine(dst *ebiten.Image, x0, y0, x1, y1 float32, strokeWidth float32, 
 		drawOp := &DrawPathOptions{}
 		drawOp.AntiAlias = true
 		drawOp.ColorScale.ScaleWithColor(clr)
-		StrokePath(dst, &path, strokeOp, drawOp)
+		StrokePath(dst, path, strokeOp, drawOp)
 		return
 	}
 
@@ -79,7 +105,11 @@ func StrokeLine(dst *ebiten.Image, x0, y0, x1, y1 float32, strokeWidth float32, 
 // FillRect fills a rectangle with the specified width and color.
 func FillRect(dst *ebiten.Image, x, y, width, height float32, clr color.Color, antialias bool) {
 	if antialias {
-		var path Path
+		path := thePathPool.Get().(*Path)
+		defer func() {
+			path.Reset()
+			thePathPool.Put(path)
+		}()
 		path.MoveTo(x, y)
 		path.LineTo(x, y+height)
 		path.LineTo(x+width, y+height)
@@ -87,7 +117,7 @@ func FillRect(dst *ebiten.Image, x, y, width, height float32, clr color.Color, a
 		drawOp := &DrawPathOptions{}
 		drawOp.AntiAlias = true
 		drawOp.ColorScale.ScaleWithColor(clr)
-		FillPath(dst, &path, nil, drawOp)
+		FillPath(dst, path, nil, drawOp)
 		return
 	}
 
@@ -109,7 +139,11 @@ func DrawFilledRect(dst *ebiten.Image, x, y, width, height float32, clr color.Co
 // StrokeRect strokes a rectangle with the specified width and color.
 func StrokeRect(dst *ebiten.Image, x, y, width, height float32, strokeWidth float32, clr color.Color, antialias bool) {
 	if antialias {
-		var path Path
+		path := thePathPool.Get().(*Path)
+		defer func() {
+			path.Reset()
+			thePathPool.Put(path)
+		}()
 		path.MoveTo(x, y)
 		path.LineTo(x, y+height)
 		path.LineTo(x+width, y+height)
@@ -121,7 +155,7 @@ func StrokeRect(dst *ebiten.Image, x, y, width, height float32, strokeWidth floa
 		drawOp := &DrawPathOptions{}
 		drawOp.AntiAlias = true
 		drawOp.ColorScale.ScaleWithColor(clr)
-		StrokePath(dst, &path, strokeOp, drawOp)
+		StrokePath(dst, path, strokeOp, drawOp)
 		return
 	}
 
@@ -169,15 +203,24 @@ func StrokeRect(dst *ebiten.Image, x, y, width, height float32, strokeWidth floa
 	}
 }
 
-// FillCircle fills a circle with the specified center position (cx, cy), the radius (r), width and color.
+// FillCircle fills a circle with the specified center position (cx, cy), the radius (r) and color.
 func FillCircle(dst *ebiten.Image, cx, cy, r float32, clr color.Color, antialias bool) {
 	if antialias {
-		var path Path
+		path := thePathPool.Get().(*Path)
+		defer func() {
+			path.Reset()
+			thePathPool.Put(path)
+		}()
 		path.Arc(cx, cy, r, 0, 2*math.Pi, Clockwise)
 		drawOp := &DrawPathOptions{}
 		drawOp.AntiAlias = true
 		drawOp.ColorScale.ScaleWithColor(clr)
-		FillPath(dst, &path, nil, drawOp)
+		FillPath(dst, path, nil, drawOp)
+		return
+	}
+
+	count := circleVertexCount(r)
+	if count == 0 {
 		return
 	}
 
@@ -188,7 +231,6 @@ func FillCircle(dst *ebiten.Image, cx, cy, r float32, clr color.Color, antialias
 	cbf := float32(cb) / 0xffff
 	caf := float32(ca) / 0xffff
 	useCachedVerticesAndIndicesForUtil(func(vs []ebiten.Vertex, is []uint32) ([]ebiten.Vertex, []uint32) {
-		count := int(math.Ceil(math.Pi * float64(r)))
 		for i := range count {
 			angle := float64(i) * (2 * math.Pi / float64(count))
 			sin, cos := math.Sincos(angle)
@@ -216,7 +258,7 @@ func FillCircle(dst *ebiten.Image, cx, cy, r float32, clr color.Color, antialias
 	})
 }
 
-// DrawFilledCircle fills a circle with the specified center position (cx, cy), the radius (r), width and color.
+// DrawFilledCircle fills a circle with the specified center position (cx, cy), the radius (r) and color.
 //
 // Deprecated: as of v2.9. Use [FillCircle] instead.
 func DrawFilledCircle(dst *ebiten.Image, cx, cy, r float32, clr color.Color, antialias bool) {
@@ -226,7 +268,11 @@ func DrawFilledCircle(dst *ebiten.Image, cx, cy, r float32, clr color.Color, ant
 // StrokeCircle strokes a circle with the specified center position (cx, cy), the radius (r), width and color.
 func StrokeCircle(dst *ebiten.Image, cx, cy, r float32, strokeWidth float32, clr color.Color, antialias bool) {
 	if antialias {
-		var path Path
+		path := thePathPool.Get().(*Path)
+		defer func() {
+			path.Reset()
+			thePathPool.Put(path)
+		}()
 		path.Arc(cx, cy, r, 0, 2*math.Pi, Clockwise)
 		path.Close()
 		strokeOp := &StrokeOptions{}
@@ -235,7 +281,7 @@ func StrokeCircle(dst *ebiten.Image, cx, cy, r float32, strokeWidth float32, clr
 		drawOp := &DrawPathOptions{}
 		drawOp.AntiAlias = true
 		drawOp.ColorScale.ScaleWithColor(clr)
-		StrokePath(dst, &path, strokeOp, drawOp)
+		StrokePath(dst, path, strokeOp, drawOp)
 		return
 	}
 
@@ -243,8 +289,13 @@ func StrokeCircle(dst *ebiten.Image, cx, cy, r float32, strokeWidth float32, clr
 		return
 	}
 
-	if strokeWidth >= r {
+	if strokeWidth >= 2*r {
 		FillCircle(dst, cx, cy, r+strokeWidth/2, clr, false)
+		return
+	}
+
+	count := circleVertexCount(r + strokeWidth/2)
+	if count == 0 {
 		return
 	}
 
@@ -255,7 +306,6 @@ func StrokeCircle(dst *ebiten.Image, cx, cy, r float32, strokeWidth float32, clr
 	cbf := float32(cb) / 0xffff
 	caf := float32(ca) / 0xffff
 	useCachedVerticesAndIndicesForUtil(func(vs []ebiten.Vertex, is []uint32) ([]ebiten.Vertex, []uint32) {
-		count := int(math.Ceil(math.Pi * float64(r+strokeWidth/2)))
 		for i := range count {
 			angle := float64(i) * (2 * math.Pi / float64(count))
 			sin, cos := math.Sincos(angle)
@@ -294,130 +344,18 @@ func StrokeCircle(dst *ebiten.Image, cx, cy, r float32, strokeWidth float32, clr
 	})
 }
 
-// FillRule is the rule whether an overlapped region is rendered or not.
-type FillRule int
-
-const (
-	// FillRuleNonZero means that triangles are rendered based on the non-zero rule.
-	// If and only if the number of overlaps is not 0, the region is rendered.
-	FillRuleNonZero FillRule = iota
-
-	// FillRuleEvenOdd means that triangles are rendered based on the even-odd rule.
-	// If and only if the number of overlaps is odd, the region is rendered.
-	FillRuleEvenOdd
-)
-
-var (
-	theCallbackTokens      = map[*ebiten.Image]int64{}
-	theFillPathsStates     = map[*ebiten.Image]*fillPathsState{}
-	theFillPathsStatesPool = sync.Pool{
-		New: func() any {
-			return &fillPathsState{}
-		},
-	}
-	theFillPathM sync.Mutex
-)
-
-// FillOptions is options to fill a path.
-type FillOptions struct {
-	// FillRule is the rule whether an overlapped region is rendered or not.
-	// The default (zero) value is FillRuleNonZero.
-	FillRule FillRule
-}
-
-// DrawPathOptions is options to draw a path.
-type DrawPathOptions struct {
-	// AntiAlias is whether the path is drawn with anti-aliasing.
-	// The default (zero) value is false.
-	AntiAlias bool
-
-	// ColorScale is the color scale to apply to the path.
-	// The default (zero) value is identity, which is (1, 1, 1, 1) (white).
-	ColorScale ebiten.ColorScale
-
-	// Blend is the blend mode to apply to the path.
-	// The default (zero) value is ebiten.BlendSourceOver.
-	Blend ebiten.Blend
-}
-
-// FillPath fills the specified path with the specified options.
-func FillPath(dst *ebiten.Image, path *Path, fillOptions *FillOptions, drawPathOptions *DrawPathOptions) {
-	if drawPathOptions == nil {
-		drawPathOptions = &DrawPathOptions{}
-	}
-	if fillOptions == nil {
-		fillOptions = &FillOptions{}
-	}
-
-	bounds := dst.Bounds()
-
-	// Get the original image if dst is a sub-image to integrate the callbacks.
-	dst = originalImage(dst)
-
-	theFillPathM.Lock()
-	defer theFillPathM.Unlock()
-
-	// Remove the previous registered callbacks.
-	if token, ok := theCallbackTokens[dst]; ok {
-		removeUsageCallback(dst, token)
-	}
-	delete(theCallbackTokens, dst)
-
-	if _, ok := theFillPathsStates[dst]; !ok {
-		theFillPathsStates[dst] = theFillPathsStatesPool.Get().(*fillPathsState)
-	}
-	s := theFillPathsStates[dst]
-	if s.antialias != drawPathOptions.AntiAlias || s.blend != drawPathOptions.Blend || s.fillRule != fillOptions.FillRule {
-		s.fillPaths(dst)
-		s.reset()
-	}
-	s.antialias = drawPathOptions.AntiAlias
-	s.blend = drawPathOptions.Blend
-	s.fillRule = fillOptions.FillRule
-	s.addPath(path, bounds, drawPathOptions.ColorScale)
-
-	// Use an independent callback function to avoid unexpected captures.
-	theCallbackTokens[dst] = addUsageCallback(dst, fillPathCallback)
-}
-
-func fillPathCallback(dst *ebiten.Image) {
-	if originalImage(dst) != dst {
-		panic("vector: dst must be the original image")
-	}
-
-	theFillPathM.Lock()
-	defer theFillPathM.Unlock()
-
-	// Remove the callback not to call this twice.
-	if token, ok := theCallbackTokens[dst]; ok {
-		removeUsageCallback(dst, token)
-	}
-	delete(theCallbackTokens, dst)
-
-	s, ok := theFillPathsStates[dst]
-	if !ok {
-		panic("vector: fillPathsState must exist here")
-	}
-	s.fillPaths(dst)
-	s.reset()
-	delete(theFillPathsStates, dst)
-	theFillPathsStatesPool.Put(s)
-}
-
 // StrokePath strokes the specified path with the specified options.
 func StrokePath(dst *ebiten.Image, path *Path, strokeOptions *StrokeOptions, drawPathOptions *DrawPathOptions) {
-	var stroke Path
+	if strokeOptions == nil {
+		strokeOptions = &StrokeOptions{}
+	}
+	stroke := thePathPool.Get().(*Path)
+	defer func() {
+		stroke.Reset()
+		thePathPool.Put(stroke)
+	}()
 	op := &AddStrokeOptions{}
 	op.StrokeOptions = *strokeOptions
 	stroke.AddStroke(path, op)
-	FillPath(dst, &stroke, nil, drawPathOptions)
+	FillPath(dst, stroke, nil, drawPathOptions)
 }
-
-//go:linkname originalImage github.com/hajimehoshi/ebiten/v2.originalImage
-func originalImage(img *ebiten.Image) *ebiten.Image
-
-//go:linkname addUsageCallback github.com/hajimehoshi/ebiten/v2.addUsageCallback
-func addUsageCallback(img *ebiten.Image, fn func(img *ebiten.Image)) int64
-
-//go:linkname removeUsageCallback github.com/hajimehoshi/ebiten/v2.removeUsageCallback
-func removeUsageCallback(img *ebiten.Image, token int64)

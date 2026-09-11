@@ -16,6 +16,7 @@
 package inpututil
 
 import (
+	"maps"
 	"slices"
 	"sync"
 
@@ -32,8 +33,8 @@ type gamepadState struct {
 
 type touchState struct {
 	duration int
-	x        int
-	y        int
+	x        float64
+	y        float64
 }
 
 type inputState struct {
@@ -71,9 +72,7 @@ func (i *inputState) update() {
 
 	// Copy the gamepad states.
 	clear(i.prevGamepadStates)
-	for id, s := range i.gamepadStates {
-		i.prevGamepadStates[id] = s
-	}
+	maps.Copy(i.prevGamepadStates, i.gamepadStates)
 
 	i.gamepadIDsBuf = ebiten.AppendGamepadIDs(i.gamepadIDsBuf[:0])
 	for _, id := range i.gamepadIDsBuf {
@@ -109,15 +108,13 @@ func (i *inputState) update() {
 
 	// Copy the touch durations and positions.
 	clear(i.prevTouchStates)
-	for id, state := range i.touchStates {
-		i.prevTouchStates[id] = state
-	}
+	maps.Copy(i.prevTouchStates, i.touchStates)
 
 	i.touchIDsBuf = ebiten.AppendTouchIDs(i.touchIDsBuf[:0])
 	for _, id := range i.touchIDsBuf {
 		state := i.touchStates[id]
 		state.duration++
-		state.x, state.y = ebiten.TouchPosition(id)
+		state.x, state.y = ebiten.TouchPositionF(id)
 		i.touchStates[id] = state
 	}
 
@@ -171,6 +168,9 @@ func AppendJustReleasedKeys(keys []ebiten.Key) []ebiten.Key {
 // IsKeyJustPressed returns a boolean value indicating
 // whether the given key is pressed just in the current tick.
 //
+// IsKeyJustPressed always returns false for a key that represents multiple keys like [ebiten.KeyShift].
+// Use its left and right variants like [ebiten.KeyShiftLeft] and [ebiten.KeyShiftRight] instead.
+//
 // IsKeyJustPressed must be called in a game's Update, not Draw.
 //
 // IsKeyJustPressed is concurrent safe.
@@ -181,6 +181,9 @@ func IsKeyJustPressed(key ebiten.Key) bool {
 // IsKeyJustReleased returns a boolean value indicating
 // whether the given key is released just in the current tick.
 //
+// IsKeyJustReleased always returns false for a key that represents multiple keys like [ebiten.KeyShift].
+// Use its left and right variants like [ebiten.KeyShiftLeft] and [ebiten.KeyShiftRight] instead.
+//
 // IsKeyJustReleased must be called in a game's Update, not Draw.
 //
 // IsKeyJustReleased is concurrent safe.
@@ -189,6 +192,12 @@ func IsKeyJustReleased(key ebiten.Key) bool {
 }
 
 // KeyPressDuration returns how long the key is pressed in ticks (Update).
+//
+// KeyPressDuration follows [ebiten.IsKeyPressed], and thus returns a positive value for a modifier key
+// released in the current tick.
+//
+// KeyPressDuration always returns 0 for a key that represents multiple keys like [ebiten.KeyShift].
+// Use its left and right variants like [ebiten.KeyShiftLeft] and [ebiten.KeyShiftRight] instead.
 //
 // KeyPressDuration must be called in a game's Update, not Draw.
 //
@@ -371,6 +380,10 @@ func IsGamepadButtonJustPressed(id ebiten.GamepadID, button ebiten.GamepadButton
 //
 // IsGamepadButtonJustReleased is concurrent safe.
 func IsGamepadButtonJustReleased(id ebiten.GamepadID, button ebiten.GamepadButton) bool {
+	if button < 0 || ebiten.GamepadButtonMax < button {
+		return false
+	}
+
 	theInputState.m.RLock()
 	defer theInputState.m.RUnlock()
 
@@ -392,6 +405,10 @@ func IsGamepadButtonJustReleased(id ebiten.GamepadID, button ebiten.GamepadButto
 //
 // GamepadButtonPressDuration is concurrent safe.
 func GamepadButtonPressDuration(id ebiten.GamepadID, button ebiten.GamepadButton) int {
+	if button < 0 || ebiten.GamepadButtonMax < button {
+		return 0
+	}
+
 	theInputState.m.RLock()
 	defer theInputState.m.RUnlock()
 
@@ -502,6 +519,10 @@ func IsStandardGamepadButtonJustPressed(id ebiten.GamepadID, button ebiten.Stand
 //
 // IsStandardGamepadButtonJustReleased is concurrent safe.
 func IsStandardGamepadButtonJustReleased(id ebiten.GamepadID, button ebiten.StandardGamepadButton) bool {
+	if button < 0 || ebiten.StandardGamepadButtonMax < button {
+		return false
+	}
+
 	theInputState.m.RLock()
 	defer theInputState.m.RUnlock()
 
@@ -523,6 +544,10 @@ func IsStandardGamepadButtonJustReleased(id ebiten.GamepadID, button ebiten.Stan
 //
 // StandardGamepadButtonPressDuration is concurrent safe.
 func StandardGamepadButtonPressDuration(id ebiten.GamepadID, button ebiten.StandardGamepadButton) int {
+	if button < 0 || ebiten.StandardGamepadButtonMax < button {
+		return 0
+	}
+
 	theInputState.m.RLock()
 	defer theInputState.m.RUnlock()
 
@@ -537,6 +562,11 @@ func StandardGamepadButtonPressDuration(id ebiten.GamepadID, button ebiten.Stand
 // AppendJustPressedTouchIDs append touch IDs that are created just in the current tick to touchIDs,
 // and returns the extended buffer.
 // Giving a slice that already has enough capacity works efficiently.
+//
+// The touches are sampled once per tick, so a touch which was created and released between two
+// ticks is not reported at all.
+// A new touch which reuses an ID that is still being tracked is not reported either, as its ID is
+// not new.
 //
 // AppendJustPressedTouchIDs must be called in a game's Update, not Draw.
 //
@@ -570,6 +600,9 @@ func JustPressedTouchIDs() []ebiten.TouchID {
 // and returns the extended buffer.
 // Giving a slice that already has enough capacity works efficiently.
 //
+// A touch which was created and released between two ticks is not reported as released, and a new
+// touch which reused the ID of a released one is reported as a continuation of the previous touch.
+//
 // AppendJustReleasedTouchIDs must be called in a game's Update, not Draw.
 //
 // AppendJustReleasedTouchIDs is concurrent safe.
@@ -596,6 +629,9 @@ func AppendJustReleasedTouchIDs(touchIDs []ebiten.TouchID) []ebiten.TouchID {
 // IsTouchJustReleased returns a boolean value indicating
 // whether the given touch is released just in the current tick.
 //
+// A touch which was created and released between two ticks is not reported as released, and a new
+// touch which reused the ID of a released one is reported as a continuation of the previous touch.
+//
 // IsTouchJustReleased must be called in a game's Update, not Draw.
 //
 // IsTouchJustReleased is concurrent safe.
@@ -610,6 +646,9 @@ func IsTouchJustReleased(id ebiten.TouchID) bool {
 
 // TouchPressDuration returns how long the touch remains in ticks (Update).
 //
+// The duration is counted per touch ID, not per touch: a new touch which reused the ID of a touch
+// released between two ticks continues the duration of the previous touch.
+//
 // TouchPressDuration must be called in a game's Update, not Draw.
 //
 // TouchPressDuration is concurrent safe.
@@ -622,10 +661,27 @@ func TouchPressDuration(id ebiten.TouchID) int {
 // TouchPositionInPreviousTick returns the position in the previous tick.
 // If the touch is a just-released touch, TouchPositionInPreviousTick returns the last position of the touch.
 //
+// The position is tracked per touch ID, not per touch: a new touch which reused the ID of a touch
+// released between two ticks continues the position of the previous touch.
+//
 // TouchPositionInPreviousTick must be called in a game's Update, not Draw.
 //
-// TouchJustReleasedPosition is concurrent safe.
+// TouchPositionInPreviousTick is concurrent safe.
 func TouchPositionInPreviousTick(id ebiten.TouchID) (int, int) {
+	x, y := TouchPositionFInPreviousTick(id)
+	return int(x), int(y)
+}
+
+// TouchPositionFInPreviousTick returns the high-precision position in the previous tick.
+// If the touch is a just-released touch, TouchPositionFInPreviousTick returns the last position of the touch.
+//
+// The position is tracked per touch ID, not per touch: a new touch which reused the ID of a touch
+// released between two ticks continues the position of the previous touch.
+//
+// TouchPositionFInPreviousTick must be called in a game's Update, not Draw.
+//
+// TouchPositionFInPreviousTick is concurrent safe.
+func TouchPositionFInPreviousTick(id ebiten.TouchID) (float64, float64) {
 	theInputState.m.RLock()
 	defer theInputState.m.RUnlock()
 

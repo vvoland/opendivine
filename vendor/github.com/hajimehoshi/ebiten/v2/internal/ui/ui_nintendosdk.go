@@ -65,7 +65,7 @@ type userInterfaceImpl struct {
 	inputState    InputState
 	nativeTouches []C.struct_Touch
 
-	m sync.Mutex
+	mu sync.Mutex
 }
 
 func (u *UserInterface) init() error {
@@ -94,7 +94,7 @@ func (u *UserInterface) loopGame() error {
 	for {
 		recordProfilerHeartbeat()
 
-		if err := u.context.updateFrame(u.graphicsDriver, float64(C.kScreenWidth), float64(C.kScreenHeight), theMonitor.DeviceScaleFactor(), u); err != nil {
+		if err := u.context.updateFrame(u.graphicsDriver, float64(C.kScreenWidth), float64(C.kScreenHeight), int(C.kScreenWidth), int(C.kScreenHeight), theMonitor.DeviceScaleFactor(), u, true); err != nil {
 			return err
 		}
 	}
@@ -105,8 +105,8 @@ func (*UserInterface) IsFocused() bool {
 }
 
 func (u *UserInterface) readInputState(inputState *InputState) {
-	u.m.Lock()
-	defer u.m.Unlock()
+	u.mu.Lock()
+	defer u.mu.Unlock()
 	u.inputState.copyAndReset(inputState)
 }
 
@@ -186,4 +186,8 @@ func IsScreenTransparentAvailable() bool {
 
 func dipToNativePixels(x float64, scale float64) float64 {
 	return x
+}
+
+func (u *UserInterface) RunOnMainThread(f func()) {
+	panic("ui: RunOnMainThread is not implemented for this platform")
 }

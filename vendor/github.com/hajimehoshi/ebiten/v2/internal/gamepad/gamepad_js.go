@@ -42,9 +42,7 @@ func (g *nativeGamepadsImpl) update(gamepads *gamepads) error {
 	// TODO: Use the gamepad events instead of navigator.getGamepads.
 
 	defer func() {
-		for k := range g.indices {
-			delete(g.indices, k)
-		}
+		clear(g.indices)
 	}()
 
 	nav := js.Global().Get("navigator")
@@ -94,7 +92,9 @@ func (g *nativeGamepadsImpl) update(gamepads *gamepads) error {
 				mapping: gp.Get("mapping").String(),
 			}
 		}
-		gamepad.native.(*nativeGamepadImpl).value = gp
+		withNative(gamepad, func(n *nativeGamepadImpl) {
+			n.value = gp
+		})
 	}
 
 	// Remove an unused gamepads.

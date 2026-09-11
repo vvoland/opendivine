@@ -15,6 +15,7 @@
 package graphicscommand
 
 import (
+	"errors"
 	"fmt"
 	"image"
 	"math"
@@ -25,7 +26,6 @@ import (
 	"github.com/hajimehoshi/ebiten/v2/internal/debug"
 	"github.com/hajimehoshi/ebiten/v2/internal/graphics"
 	"github.com/hajimehoshi/ebiten/v2/internal/graphicsdriver"
-	"github.com/hajimehoshi/ebiten/v2/internal/shaderir"
 )
 
 const (
@@ -44,18 +44,53 @@ const (
 	maxVertexFloatCount = MaxVertexCount * graphics.VertexFloatCount
 )
 
-var vsyncEnabled atomic.Bool
+// The vsync state and whether the graphics driver has been updated for it.
+// The zero value means that vsync is enabled and the graphics driver has not been updated yet.
+const (
+	vsyncEnabledPending = iota
+	vsyncEnabledApplied
+	vsyncDisabledPending
+	vsyncDisabledApplied
+)
 
-func init() {
-	vsyncEnabled.Store(true)
+var vsyncState atomic.Int32
+
+// SetVsyncEnabled sets whether vsync is enabled.
+// The graphics driver is updated at the next flush.
+//
+// SetVsyncEnabled can be called from any goroutine.
+func SetVsyncEnabled(enabled bool) {
+	if enabled {
+		vsyncState.Store(vsyncEnabledPending)
+		return
+	}
+	vsyncState.Store(vsyncDisabledPending)
 }
 
-func SetVsyncEnabled(enabled bool, graphicsDriver graphicsdriver.Graphics) {
-	vsyncEnabled.Store(enabled)
+func isVsyncEnabled() bool {
+	s := vsyncState.Load()
+	return s == vsyncEnabledPending || s == vsyncEnabledApplied
+}
 
-	runOnRenderThread(func() {
-		graphicsDriver.SetVsyncEnabled(enabled)
-	}, true)
+// applyVsyncEnabledIfNeeded updates the graphics driver's vsync state when the driver has not been
+// updated for the current state yet.
+//
+// The main thread can call SetVsyncEnabled, and the main thread must never wait for the render
+// thread, which can be waiting for the main thread in the middle of a frame. The state is therefore
+// applied on the render thread at a flush.
+//
+// applyVsyncEnabledIfNeeded must be called on the render thread.
+func applyVsyncEnabledIfNeeded(graphicsDriver graphicsdriver.Graphics) {
+	// A state change during the call below makes the compare-and-swap fail, and then the state
+	// stays pending and the next flush applies it.
+	switch s := vsyncState.Load(); s {
+	case vsyncEnabledPending:
+		graphicsDriver.SetVsyncEnabled(true)
+		vsyncState.CompareAndSwap(s, vsyncEnabledApplied)
+	case vsyncDisabledPending:
+		graphicsDriver.SetVsyncEnabled(false)
+		vsyncState.CompareAndSwap(s, vsyncDisabledApplied)
+	}
 }
 
 // FlushCommands flushes the command queue and present the screen if needed.
@@ -106,12 +141,12 @@ func mustUseDifferentVertexBuffer(nextNumVertexFloats int) bool {
 }
 
 // EnqueueDrawTrianglesCommand enqueues a drawing-image command.
-func (q *commandQueue) EnqueueDrawTrianglesCommand(dst *Image, srcs [graphics.ShaderSrcImageCount]*Image, vertices []float32, indices []uint32, blend graphicsdriver.Blend, dstRegion image.Rectangle, srcRegions [graphics.ShaderSrcImageCount]image.Rectangle, shader *Shader, uniforms []uint32, fillRule graphicsdriver.FillRule) {
+func (q *commandQueue) EnqueueDrawTrianglesCommand(dst *Image, srcs [graphics.ShaderSrcImageCount]*Image, vertices []float32, indices []uint32, blend graphicsdriver.Blend, dstRegion image.Rectangle, srcRegions [graphics.ShaderSrcImageCount]image.Rectangle, shader *Shader, uniforms []uint32) {
 	if len(vertices) > maxVertexFloatCount {
 		panic(fmt.Sprintf("graphicscommand: len(vertices) must equal to or less than %d but was %d", maxVertexFloatCount, len(vertices)))
 	}
 
-	split := false
+	var split bool
 	if mustUseDifferentVertexBuffer(q.tmpNumVertexFloats + len(vertices)) {
 		q.tmpNumVertexFloats = 0
 		split = true
@@ -134,7 +169,7 @@ func (q *commandQueue) EnqueueDrawTrianglesCommand(dst *Image, srcs [graphics.Sh
 	// TODO: If dst is the screen, reorder the command to be the last.
 	if !split && 0 < len(q.commands) {
 		if last, ok := q.commands[len(q.commands)-1].(*drawTrianglesCommand); ok {
-			if last.CanMergeWithDrawTrianglesCommand(dst, srcs, vertices, blend, shader, uniforms, fillRule) {
+			if last.CanMergeWithDrawTrianglesCommand(dst, srcs, vertices, blend, shader, uniforms) {
 				last.setVertices(q.lastVertices(len(vertices) + last.numVertices()))
 				if last.dstRegions[len(last.dstRegions)-1].Region == dstRegion {
 					last.dstRegions[len(last.dstRegions)-1].IndexCount += len(indices)
@@ -154,15 +189,12 @@ func (q *commandQueue) EnqueueDrawTrianglesCommand(dst *Image, srcs [graphics.Sh
 	c.srcs = srcs
 	c.vertices = q.lastVertices(len(vertices))
 	c.blend = blend
-	c.dstRegions = []graphicsdriver.DstRegion{
-		{
-			Region:     dstRegion,
-			IndexCount: len(indices),
-		},
-	}
+	c.dstRegions = append(c.dstRegions[:0], graphicsdriver.DstRegion{
+		Region:     dstRegion,
+		IndexCount: len(indices),
+	})
 	c.shader = shader
 	c.uniforms = uniforms
-	c.fillRule = fillRule
 	c.firstCaller = ""
 	if debug.IsDebug {
 		file, line, typ := debug.FirstCaller()
@@ -196,7 +228,7 @@ func (q *commandQueue) Flush(graphicsDriver graphicsdriver.Graphics, endFrame bo
 
 	var sync bool
 	// Disable asynchronous rendering when vsync is on, as this causes a rendering delay (#2822).
-	if endFrame && vsyncEnabled.Load() {
+	if endFrame && isVsyncEnabled() {
 		sync = true
 	}
 	if !sync {
@@ -213,6 +245,8 @@ func (q *commandQueue) Flush(graphicsDriver graphicsdriver.Graphics, endFrame bo
 	var flushErr error
 	runOnRenderThread(func() {
 		defer logger.Flush()
+
+		applyVsyncEnabledIfNeeded(graphicsDriver)
 
 		if err := q.flush(graphicsDriver, endFrame, logger); err != nil {
 			if sync {
@@ -250,8 +284,8 @@ func (q *commandQueue) flush(graphicsDriver graphicsdriver.Graphics, endFrame bo
 
 	defer func() {
 		// Call End even if an error causes, or the graphics driver's state might be stale (#2388).
-		if err1 := graphicsDriver.End(endFrame); err1 != nil && err == nil {
-			err = err1
+		if graphicsErr := graphicsDriver.End(endFrame); graphicsErr != nil {
+			err = errors.Join(err, graphicsErr)
 		}
 
 		// Release the commands explicitly (#1803).
@@ -280,9 +314,9 @@ func (q *commandQueue) flush(graphicsDriver graphicsdriver.Graphics, endFrame bo
 
 	cs := q.commands
 	for len(cs) > 0 {
-		nv := 0
-		ne := 0
-		nc := 0
+		var nv int
+		var ne int
+		var nc int
 		for _, c := range cs {
 			if dtc, ok := c.(*drawTrianglesCommand); ok {
 				if nc > 0 && mustUseDifferentVertexBuffer(nv+dtc.numVertices()) {
@@ -300,7 +334,7 @@ func (q *commandQueue) flush(graphicsDriver graphicsdriver.Graphics, endFrame bo
 			es = es[ne:]
 			vs = vs[nv:]
 		}
-		indexOffset := 0
+		var indexOffset int
 		for _, c := range cs[:nc] {
 			if err := c.Exec(q, graphicsDriver, indexOffset); err != nil {
 				return err
@@ -395,12 +429,6 @@ func prependPreservedUniforms(uniforms []uint32, shader *Shader, dst *Image, src
 	}
 
 	dr := imageRectangleToRectangleF32(dstRegion)
-	if shader.unit() == shaderir.Texels {
-		dr.x /= float32(dw)
-		dr.y /= float32(dh)
-		dr.width /= float32(dw)
-		dr.height /= float32(dh)
-	}
 
 	// Set the destination region origin.
 	uniforms[10] = math.Float32bits(dr.x)
@@ -413,18 +441,6 @@ func prependPreservedUniforms(uniforms []uint32, shader *Shader, dst *Image, src
 	var srs [graphics.ShaderSrcImageCount]rectangleF32
 	for i, r := range srcRegions {
 		srs[i] = imageRectangleToRectangleF32(r)
-	}
-	if shader.unit() == shaderir.Texels {
-		for i, src := range srcs {
-			if src == nil {
-				continue
-			}
-			w, h := src.InternalSize()
-			srs[i].x /= float32(w)
-			srs[i].y /= float32(h)
-			srs[i].width /= float32(w)
-			srs[i].height /= float32(h)
-		}
 	}
 
 	// Set the source region origins.
@@ -522,11 +538,11 @@ func (c *commandQueueManager) putCommandQueue(commandQueue *commandQueue) {
 	c.pool.put(commandQueue)
 }
 
-func (c *commandQueueManager) enqueueDrawTrianglesCommand(dst *Image, srcs [graphics.ShaderSrcImageCount]*Image, vertices []float32, indices []uint32, blend graphicsdriver.Blend, dstRegion image.Rectangle, srcRegions [graphics.ShaderSrcImageCount]image.Rectangle, shader *Shader, uniforms []uint32, fillRule graphicsdriver.FillRule) {
+func (c *commandQueueManager) enqueueDrawTrianglesCommand(dst *Image, srcs [graphics.ShaderSrcImageCount]*Image, vertices []float32, indices []uint32, blend graphicsdriver.Blend, dstRegion image.Rectangle, srcRegions [graphics.ShaderSrcImageCount]image.Rectangle, shader *Shader, uniforms []uint32) {
 	if c.current == nil {
 		c.current, _ = c.pool.get()
 	}
-	c.current.EnqueueDrawTrianglesCommand(dst, srcs, vertices, indices, blend, dstRegion, srcRegions, shader, uniforms, fillRule)
+	c.current.EnqueueDrawTrianglesCommand(dst, srcs, vertices, indices, blend, dstRegion, srcRegions, shader, uniforms)
 }
 
 func (c *commandQueueManager) flush(graphicsDriver graphicsdriver.Graphics, endFrame bool) error {

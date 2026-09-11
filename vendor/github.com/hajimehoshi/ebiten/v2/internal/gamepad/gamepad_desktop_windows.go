@@ -15,12 +15,12 @@
 package gamepad
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
-	"sort"
+	"slices"
 	"strings"
 	"sync/atomic"
-	"syscall"
 	"time"
 	"unsafe"
 
@@ -39,50 +39,50 @@ const (
 )
 
 var dinputObjectDataFormats = []_DIOBJECTDATAFORMAT{
-	{&_GUID_XAxis, _DIJOFS_X, _DIDFT_AXIS | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, _DIDOI_ASPECTPOSITION},
-	{&_GUID_YAxis, _DIJOFS_Y, _DIDFT_AXIS | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, _DIDOI_ASPECTPOSITION},
-	{&_GUID_ZAxis, _DIJOFS_Z, _DIDFT_AXIS | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, _DIDOI_ASPECTPOSITION},
-	{&_GUID_RxAxis, _DIJOFS_RX, _DIDFT_AXIS | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, _DIDOI_ASPECTPOSITION},
-	{&_GUID_RyAxis, _DIJOFS_RY, _DIDFT_AXIS | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, _DIDOI_ASPECTPOSITION},
-	{&_GUID_RzAxis, _DIJOFS_RZ, _DIDFT_AXIS | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, _DIDOI_ASPECTPOSITION},
-	{&_GUID_Slider, _DIJOFS_SLIDER(0), _DIDFT_AXIS | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, _DIDOI_ASPECTPOSITION},
-	{&_GUID_Slider, _DIJOFS_SLIDER(1), _DIDFT_AXIS | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, _DIDOI_ASPECTPOSITION},
-	{&_GUID_POV, _DIJOFS_POV(0), _DIDFT_POV | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, 0},
-	{&_GUID_POV, _DIJOFS_POV(1), _DIDFT_POV | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, 0},
-	{&_GUID_POV, _DIJOFS_POV(2), _DIDFT_POV | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, 0},
-	{&_GUID_POV, _DIJOFS_POV(3), _DIDFT_POV | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, 0},
-	{nil, _DIJOFS_BUTTON(0), _DIDFT_BUTTON | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, 0},
-	{nil, _DIJOFS_BUTTON(1), _DIDFT_BUTTON | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, 0},
-	{nil, _DIJOFS_BUTTON(2), _DIDFT_BUTTON | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, 0},
-	{nil, _DIJOFS_BUTTON(3), _DIDFT_BUTTON | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, 0},
-	{nil, _DIJOFS_BUTTON(4), _DIDFT_BUTTON | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, 0},
-	{nil, _DIJOFS_BUTTON(5), _DIDFT_BUTTON | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, 0},
-	{nil, _DIJOFS_BUTTON(6), _DIDFT_BUTTON | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, 0},
-	{nil, _DIJOFS_BUTTON(7), _DIDFT_BUTTON | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, 0},
-	{nil, _DIJOFS_BUTTON(8), _DIDFT_BUTTON | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, 0},
-	{nil, _DIJOFS_BUTTON(9), _DIDFT_BUTTON | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, 0},
-	{nil, _DIJOFS_BUTTON(10), _DIDFT_BUTTON | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, 0},
-	{nil, _DIJOFS_BUTTON(11), _DIDFT_BUTTON | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, 0},
-	{nil, _DIJOFS_BUTTON(12), _DIDFT_BUTTON | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, 0},
-	{nil, _DIJOFS_BUTTON(13), _DIDFT_BUTTON | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, 0},
-	{nil, _DIJOFS_BUTTON(14), _DIDFT_BUTTON | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, 0},
-	{nil, _DIJOFS_BUTTON(15), _DIDFT_BUTTON | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, 0},
-	{nil, _DIJOFS_BUTTON(16), _DIDFT_BUTTON | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, 0},
-	{nil, _DIJOFS_BUTTON(17), _DIDFT_BUTTON | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, 0},
-	{nil, _DIJOFS_BUTTON(18), _DIDFT_BUTTON | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, 0},
-	{nil, _DIJOFS_BUTTON(19), _DIDFT_BUTTON | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, 0},
-	{nil, _DIJOFS_BUTTON(20), _DIDFT_BUTTON | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, 0},
-	{nil, _DIJOFS_BUTTON(21), _DIDFT_BUTTON | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, 0},
-	{nil, _DIJOFS_BUTTON(22), _DIDFT_BUTTON | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, 0},
-	{nil, _DIJOFS_BUTTON(23), _DIDFT_BUTTON | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, 0},
-	{nil, _DIJOFS_BUTTON(24), _DIDFT_BUTTON | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, 0},
-	{nil, _DIJOFS_BUTTON(25), _DIDFT_BUTTON | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, 0},
-	{nil, _DIJOFS_BUTTON(26), _DIDFT_BUTTON | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, 0},
-	{nil, _DIJOFS_BUTTON(27), _DIDFT_BUTTON | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, 0},
-	{nil, _DIJOFS_BUTTON(28), _DIDFT_BUTTON | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, 0},
-	{nil, _DIJOFS_BUTTON(29), _DIDFT_BUTTON | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, 0},
-	{nil, _DIJOFS_BUTTON(30), _DIDFT_BUTTON | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, 0},
-	{nil, _DIJOFS_BUTTON(31), _DIDFT_BUTTON | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, 0},
+	{pguid: &_GUID_XAxis, dwOfs: _DIJOFS_X, dwType: _DIDFT_AXIS | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, dwFlags: _DIDOI_ASPECTPOSITION},
+	{pguid: &_GUID_YAxis, dwOfs: _DIJOFS_Y, dwType: _DIDFT_AXIS | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, dwFlags: _DIDOI_ASPECTPOSITION},
+	{pguid: &_GUID_ZAxis, dwOfs: _DIJOFS_Z, dwType: _DIDFT_AXIS | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, dwFlags: _DIDOI_ASPECTPOSITION},
+	{pguid: &_GUID_RxAxis, dwOfs: _DIJOFS_RX, dwType: _DIDFT_AXIS | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, dwFlags: _DIDOI_ASPECTPOSITION},
+	{pguid: &_GUID_RyAxis, dwOfs: _DIJOFS_RY, dwType: _DIDFT_AXIS | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, dwFlags: _DIDOI_ASPECTPOSITION},
+	{pguid: &_GUID_RzAxis, dwOfs: _DIJOFS_RZ, dwType: _DIDFT_AXIS | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, dwFlags: _DIDOI_ASPECTPOSITION},
+	{pguid: &_GUID_Slider, dwOfs: _DIJOFS_SLIDER(0), dwType: _DIDFT_AXIS | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, dwFlags: _DIDOI_ASPECTPOSITION},
+	{pguid: &_GUID_Slider, dwOfs: _DIJOFS_SLIDER(1), dwType: _DIDFT_AXIS | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, dwFlags: _DIDOI_ASPECTPOSITION},
+	{pguid: &_GUID_POV, dwOfs: _DIJOFS_POV(0), dwType: _DIDFT_POV | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, dwFlags: 0},
+	{pguid: &_GUID_POV, dwOfs: _DIJOFS_POV(1), dwType: _DIDFT_POV | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, dwFlags: 0},
+	{pguid: &_GUID_POV, dwOfs: _DIJOFS_POV(2), dwType: _DIDFT_POV | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, dwFlags: 0},
+	{pguid: &_GUID_POV, dwOfs: _DIJOFS_POV(3), dwType: _DIDFT_POV | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, dwFlags: 0},
+	{pguid: nil, dwOfs: _DIJOFS_BUTTON(0), dwType: _DIDFT_BUTTON | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, dwFlags: 0},
+	{pguid: nil, dwOfs: _DIJOFS_BUTTON(1), dwType: _DIDFT_BUTTON | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, dwFlags: 0},
+	{pguid: nil, dwOfs: _DIJOFS_BUTTON(2), dwType: _DIDFT_BUTTON | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, dwFlags: 0},
+	{pguid: nil, dwOfs: _DIJOFS_BUTTON(3), dwType: _DIDFT_BUTTON | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, dwFlags: 0},
+	{pguid: nil, dwOfs: _DIJOFS_BUTTON(4), dwType: _DIDFT_BUTTON | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, dwFlags: 0},
+	{pguid: nil, dwOfs: _DIJOFS_BUTTON(5), dwType: _DIDFT_BUTTON | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, dwFlags: 0},
+	{pguid: nil, dwOfs: _DIJOFS_BUTTON(6), dwType: _DIDFT_BUTTON | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, dwFlags: 0},
+	{pguid: nil, dwOfs: _DIJOFS_BUTTON(7), dwType: _DIDFT_BUTTON | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, dwFlags: 0},
+	{pguid: nil, dwOfs: _DIJOFS_BUTTON(8), dwType: _DIDFT_BUTTON | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, dwFlags: 0},
+	{pguid: nil, dwOfs: _DIJOFS_BUTTON(9), dwType: _DIDFT_BUTTON | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, dwFlags: 0},
+	{pguid: nil, dwOfs: _DIJOFS_BUTTON(10), dwType: _DIDFT_BUTTON | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, dwFlags: 0},
+	{pguid: nil, dwOfs: _DIJOFS_BUTTON(11), dwType: _DIDFT_BUTTON | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, dwFlags: 0},
+	{pguid: nil, dwOfs: _DIJOFS_BUTTON(12), dwType: _DIDFT_BUTTON | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, dwFlags: 0},
+	{pguid: nil, dwOfs: _DIJOFS_BUTTON(13), dwType: _DIDFT_BUTTON | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, dwFlags: 0},
+	{pguid: nil, dwOfs: _DIJOFS_BUTTON(14), dwType: _DIDFT_BUTTON | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, dwFlags: 0},
+	{pguid: nil, dwOfs: _DIJOFS_BUTTON(15), dwType: _DIDFT_BUTTON | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, dwFlags: 0},
+	{pguid: nil, dwOfs: _DIJOFS_BUTTON(16), dwType: _DIDFT_BUTTON | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, dwFlags: 0},
+	{pguid: nil, dwOfs: _DIJOFS_BUTTON(17), dwType: _DIDFT_BUTTON | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, dwFlags: 0},
+	{pguid: nil, dwOfs: _DIJOFS_BUTTON(18), dwType: _DIDFT_BUTTON | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, dwFlags: 0},
+	{pguid: nil, dwOfs: _DIJOFS_BUTTON(19), dwType: _DIDFT_BUTTON | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, dwFlags: 0},
+	{pguid: nil, dwOfs: _DIJOFS_BUTTON(20), dwType: _DIDFT_BUTTON | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, dwFlags: 0},
+	{pguid: nil, dwOfs: _DIJOFS_BUTTON(21), dwType: _DIDFT_BUTTON | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, dwFlags: 0},
+	{pguid: nil, dwOfs: _DIJOFS_BUTTON(22), dwType: _DIDFT_BUTTON | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, dwFlags: 0},
+	{pguid: nil, dwOfs: _DIJOFS_BUTTON(23), dwType: _DIDFT_BUTTON | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, dwFlags: 0},
+	{pguid: nil, dwOfs: _DIJOFS_BUTTON(24), dwType: _DIDFT_BUTTON | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, dwFlags: 0},
+	{pguid: nil, dwOfs: _DIJOFS_BUTTON(25), dwType: _DIDFT_BUTTON | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, dwFlags: 0},
+	{pguid: nil, dwOfs: _DIJOFS_BUTTON(26), dwType: _DIDFT_BUTTON | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, dwFlags: 0},
+	{pguid: nil, dwOfs: _DIJOFS_BUTTON(27), dwType: _DIDFT_BUTTON | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, dwFlags: 0},
+	{pguid: nil, dwOfs: _DIJOFS_BUTTON(28), dwType: _DIDFT_BUTTON | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, dwFlags: 0},
+	{pguid: nil, dwOfs: _DIJOFS_BUTTON(29), dwType: _DIDFT_BUTTON | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, dwFlags: 0},
+	{pguid: nil, dwOfs: _DIJOFS_BUTTON(30), dwType: _DIDFT_BUTTON | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, dwFlags: 0},
+	{pguid: nil, dwOfs: _DIJOFS_BUTTON(31), dwType: _DIDFT_BUTTON | _DIDFT_OPTIONAL | _DIDFT_ANYINSTANCE, dwFlags: 0},
 }
 
 var xinputButtons = []uint16{
@@ -99,13 +99,7 @@ var xinputButtons = []uint16{
 }
 
 type nativeGamepadsDesktop struct {
-	dinput8    windows.Handle
 	dinput8API *_IDirectInput8W
-	xinput     windows.Handle
-
-	procDirectInput8Create    uintptr
-	procXInputGetCapabilities uintptr
-	procXInputGetState        uintptr
 
 	origWndProc         uintptr
 	wndProcCallback     uintptr
@@ -115,6 +109,11 @@ type nativeGamepadsDesktop struct {
 	nativeWindow  windows.HWND
 	deviceChanged atomic.Bool
 	err           error
+
+	// ignoredDeviceGUIDs holds the instance GUIDs of the devices that were rejected as gamepads.
+	// Identical devices can share one instance GUID (#3046), but they have the same objects and are
+	// rejected anyway.
+	ignoredDeviceGUIDs map[windows.GUID]struct{}
 }
 
 type dinputObject struct {
@@ -132,48 +131,14 @@ type enumObjectsContext struct {
 }
 
 func (g *nativeGamepadsDesktop) init(gamepads *gamepads) error {
-	// As there is no guarantee that the DLL exists, NewLazySystemDLL is not available.
-	// TODO: Is there a 'system' version of LoadLibrary?
-	if h, err := windows.LoadLibrary("dinput8.dll"); err == nil {
-		g.dinput8 = h
-
-		p, err := windows.GetProcAddress(h, "DirectInput8Create")
-		if err != nil {
-			return err
-		}
-		g.procDirectInput8Create = p
+	if err := loadDInput8(); err != nil {
+		return err
+	}
+	if err := loadXInput(); err != nil {
+		return err
 	}
 
-	// TODO: Loading xinput1_4.dll or xinput9_1_0.dll should be enough.
-	// See https://source.chromium.org/chromium/chromium/src/+/main:device/gamepad/xinput_data_fetcher_win.cc;l=75-84;drc=643cdf61903e99f27c3d80daee67e217e9d280e0
-	for _, dll := range []string{
-		"xinput1_4.dll",
-		"xinput1_3.dll",
-		"xinput9_1_0.dll",
-		"xinput1_2.dll",
-		"xinput1_1.dll",
-	} {
-		if h, err := windows.LoadLibrary(dll); err == nil {
-			g.xinput = h
-			{
-				p, err := windows.GetProcAddress(h, "XInputGetCapabilities")
-				if err != nil {
-					return err
-				}
-				g.procXInputGetCapabilities = p
-			}
-			{
-				p, err := windows.GetProcAddress(h, "XInputGetState")
-				if err != nil {
-					return err
-				}
-				g.procXInputGetState = p
-			}
-			break
-		}
-	}
-
-	if g.dinput8 != 0 {
+	if isDInput8DLLAvailable() {
 		// TODO: Use _GetModuleHandleExW to align with GLFW v3.3.8.
 		m, err := _GetModuleHandleW()
 		if err != nil {
@@ -181,7 +146,7 @@ func (g *nativeGamepadsDesktop) init(gamepads *gamepads) error {
 		}
 
 		var api *_IDirectInput8W
-		if err := g.directInput8Create(m, _DIRECTINPUT_VERSION, &_IID_IDirectInput8W, &api, nil); err != nil {
+		if err := _DirectInput8Create(m, _DIRECTINPUT_VERSION, &_IID_IDirectInput8W, &api, nil); err != nil {
 			return err
 		}
 		g.dinput8API = api
@@ -194,38 +159,8 @@ func (g *nativeGamepadsDesktop) init(gamepads *gamepads) error {
 	return nil
 }
 
-func (g *nativeGamepadsDesktop) directInput8Create(hinst uintptr, dwVersion uint32, riidltf *windows.GUID, ppvOut **_IDirectInput8W, punkOuter unsafe.Pointer) error {
-	r, _, _ := syscall.Syscall6(g.procDirectInput8Create, 5,
-		hinst, uintptr(dwVersion), uintptr(unsafe.Pointer(riidltf)), uintptr(unsafe.Pointer(ppvOut)), uintptr(punkOuter),
-		0)
-	if uint32(r) != _DI_OK {
-		return fmt.Errorf("gamepad: DirectInput8Create failed: %w", handleError(windows.Handle(uint32(r))))
-	}
-	return nil
-}
-
-func (g *nativeGamepadsDesktop) xinputGetCapabilities(dwUserIndex uint32, dwFlags uint32, pCapabilities *_XINPUT_CAPABILITIES) error {
-	// XInputGetCapabilities doesn't call SetLastError and returns an error code directly.
-	r, _, _ := syscall.Syscall(g.procXInputGetCapabilities, 3,
-		uintptr(dwUserIndex), uintptr(dwFlags), uintptr(unsafe.Pointer(pCapabilities)))
-	if e := syscall.Errno(uint32(r)); e != windows.ERROR_SUCCESS {
-		return fmt.Errorf("gamepad: XInputGetCapabilities failed: %w", e)
-	}
-	return nil
-}
-
-func (g *nativeGamepadsDesktop) xinputGetState(dwUserIndex uint32, pState *_XINPUT_STATE) error {
-	// XInputGetState doesn't call SetLastError and returns an error code directly.
-	r, _, _ := syscall.Syscall(g.procXInputGetState, 2,
-		uintptr(dwUserIndex), uintptr(unsafe.Pointer(pState)), 0)
-	if e := syscall.Errno(uint32(r)); e != windows.ERROR_SUCCESS {
-		return fmt.Errorf("gamepad: XInputGetCapabilities failed: %w", e)
-	}
-	return nil
-}
-
 func (g *nativeGamepadsDesktop) detectConnection(gamepads *gamepads) error {
-	if g.dinput8 != 0 {
+	if isDInput8DLLAvailable() {
 		if g.enumDevicesCallback == 0 {
 			g.enumDevicesCallback = windows.NewCallback(g.dinput8EnumDevicesCallback)
 		}
@@ -236,10 +171,10 @@ func (g *nativeGamepadsDesktop) detectConnection(gamepads *gamepads) error {
 			return g.err
 		}
 	}
-	if g.xinput != 0 {
+	if isXInputDLLAvailable() {
 		const xuserMaxCount = 4
 
-		for i := 0; i < xuserMaxCount; i++ {
+		for i := range xuserMaxCount {
 			if gamepads.find(func(g *Gamepad) bool {
 				n := g.native.(*nativeGamepadDesktop)
 				return n.dinputDevice == nil && n.xinputIndex == i
@@ -248,7 +183,7 @@ func (g *nativeGamepadsDesktop) detectConnection(gamepads *gamepads) error {
 			}
 
 			var xic _XINPUT_CAPABILITIES
-			if err := g.xinputGetCapabilities(uint32(i), 0, &xic); err != nil {
+			if err := _XInputGetCapabilities(uint32(i), 0, &xic); err != nil {
 				if !errors.Is(err, windows.ERROR_DEVICE_NOT_CONNECTED) {
 					return err
 				}
@@ -292,6 +227,10 @@ func (g *nativeGamepadsDesktop) dinput8EnumDevicesCallback(lpddi *_DIDEVICEINSTA
 
 	if g.err != nil {
 		return _DIENUM_STOP
+	}
+
+	if _, ok := g.ignoredDeviceGUIDs[lpddi.guidInstance]; ok {
+		return _DIENUM_CONTINUE
 	}
 
 	s, err := supportsXInput(lpddi.guidProduct)
@@ -403,11 +342,23 @@ func (g *nativeGamepadsDesktop) dinput8EnumDevicesCallback(lpddi *_DIDEVICEINSTA
 		return _DIENUM_STOP
 	}
 
-	sort.Slice(ctx.objects, func(i, j int) bool {
-		if ctx.objects[i].objectType != ctx.objects[j].objectType {
-			return ctx.objects[i].objectType < ctx.objects[j].objectType
+	// Some special devices are recognized as gamepads by OSes, and the number of their 'buttons' can
+	// exceed the maximum (#1173, #2039). Reject such a device before it is registered, and remember
+	// it so that its DirectInput device is not created again at every device change.
+	if ctx.buttonCount > ButtonCount {
+		if g.ignoredDeviceGUIDs == nil {
+			g.ignoredDeviceGUIDs = map[windows.GUID]struct{}{}
 		}
-		return ctx.objects[i].index < ctx.objects[j].index
+		g.ignoredDeviceGUIDs[lpddi.guidInstance] = struct{}{}
+		device.Release()
+		return _DIENUM_CONTINUE
+	}
+
+	slices.SortFunc(ctx.objects, func(a, b dinputObject) int {
+		return cmp.Or(
+			cmp.Compare(a.objectType, b.objectType),
+			cmp.Compare(a.index, b.index),
+		)
 	})
 
 	name := windows.UTF16ToString(lpddi.tszInstanceName[:])
@@ -608,6 +559,9 @@ type nativeGamepadDesktop struct {
 
 	xinputIndex int
 	xinputState _XINPUT_STATE
+
+	vib    bool
+	vibEnd time.Time
 }
 
 func (*nativeGamepadDesktop) hasOwnStandardLayoutMapping() bool {
@@ -626,6 +580,15 @@ func (g *nativeGamepadDesktop) usesDInput() bool {
 	return g.dinputDevice != nil
 }
 
+// close releases g's native resources. close can be called multiple times.
+func (g *nativeGamepadDesktop) close() {
+	if g.dinputDevice == nil {
+		return
+	}
+	g.dinputDevice.Release()
+	g.dinputDevice = nil
+}
+
 func (g *nativeGamepadDesktop) update(gamepads *gamepads) (err error) {
 	var disconnected bool
 	defer func() {
@@ -635,9 +598,7 @@ func (g *nativeGamepadDesktop) update(gamepads *gamepads) (err error) {
 		gamepads.remove(func(gamepad *Gamepad) bool {
 			return gamepad.native == g
 		})
-		if g.dinputDevice != nil {
-			g.dinputDevice.Release()
-		}
+		g.close()
 	}()
 
 	if g.usesDInput() {
@@ -726,7 +687,7 @@ func (g *nativeGamepadDesktop) update(gamepads *gamepads) (err error) {
 	}
 
 	var state _XINPUT_STATE
-	if err := gamepads.native.(*nativeGamepadsDesktop).xinputGetState(uint32(g.xinputIndex), &state); err != nil {
+	if err := _XInputGetState(uint32(g.xinputIndex), &state); err != nil {
 		if !errors.Is(err, windows.ERROR_DEVICE_NOT_CONNECTED) {
 			return err
 		}
@@ -734,6 +695,11 @@ func (g *nativeGamepadDesktop) update(gamepads *gamepads) (err error) {
 		return nil
 	}
 	g.xinputState = state
+
+	// XInput vibration lasts until changed, so stop it once the requested duration has passed.
+	if g.vib && time.Since(g.vibEnd) >= 0 {
+		g.stopVibration()
+	}
 	return nil
 }
 
@@ -847,5 +813,25 @@ func (g *nativeGamepadDesktop) hatState(hat int) int {
 }
 
 func (g *nativeGamepadDesktop) vibrate(duration time.Duration, strongMagnitude float64, weakMagnitude float64) {
-	// TODO: Implement this (#1452)
+	if g.usesDInput() {
+		// TODO: Implement this for DirectInput devices (#2014)
+		return
+	}
+
+	if strongMagnitude <= 0 && weakMagnitude <= 0 {
+		g.stopVibration()
+		return
+	}
+
+	g.vib = true
+	g.vibEnd = time.Now().Add(duration)
+	_ = _XInputSetState(uint32(g.xinputIndex), &_XINPUT_VIBRATION{
+		wLeftMotorSpeed:  motorMagnitude(strongMagnitude),
+		wRightMotorSpeed: motorMagnitude(weakMagnitude),
+	})
+}
+
+func (g *nativeGamepadDesktop) stopVibration() {
+	g.vib = false
+	_ = _XInputSetState(uint32(g.xinputIndex), &_XINPUT_VIBRATION{})
 }

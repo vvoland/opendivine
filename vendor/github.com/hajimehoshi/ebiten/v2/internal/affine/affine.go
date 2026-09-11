@@ -15,11 +15,11 @@
 package affine
 
 func mulSquare(lhs, rhs *[16]float32, dim int) [16]float32 {
-	result := [16]float32{}
-	for i := 0; i < dim; i++ {
-		for j := 0; j < dim; j++ {
-			e := float32(0.0)
-			for k := 0; k < dim; k++ {
+	var result [16]float32
+	for i := range dim {
+		for j := range dim {
+			var e float32
+			for k := range dim {
 				e += lhs[i*dim+k] * rhs[k*dim+j]
 			}
 			result[i*dim+j] = e

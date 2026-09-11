@@ -10,8 +10,7 @@ A low-level library to play sound.
   - [Prerequisite](#prerequisite)
     - [macOS](#macos)
     - [iOS](#ios)
-    - [Linux](#linux)
-    - [FreeBSD, OpenBSD](#freebsd-openbsd)
+    - [Linux, FreeBSD, OpenBSD](#linux-freebsd-openbsd)
   - [Usage](#usage)
     - [Playing sounds from memory](#playing-sounds-from-memory)
     - [Playing sounds by file streaming](#playing-sounds-by-file-streaming)
@@ -20,14 +19,14 @@ A low-level library to play sound.
 
 ## Platforms
 
-- Windows (no Cgo required!)
-- macOS (no Cgo required!)
-- Linux
-- FreeBSD
-- OpenBSD
+- Windows (no Cgo required)
+- macOS (no Cgo required)
+- Linux (no Cgo required)
+- FreeBSD (no Cgo required)
+- OpenBSD (no Cgo required)
 - Android
 - iOS
-- WebAssembly
+- WebAssembly (no Cgo required)
 - Nintendo Switch
 - Xbox
 
@@ -37,7 +36,7 @@ On some platforms you will need a C/C++ compiler in your path that Go can use.
 
 - iOS: On newer macOS versions type `clang` on your terminal and a dialog with installation instructions will appear if you don't have it
   - If you get an error with clang use xcode instead `xcode-select --install`
-- Linux and other Unix systems: Should be installed by default, but if not try [GCC](https://gcc.gnu.org/) or [Clang](https://releases.llvm.org/download.html)
+- Console targets may still need a working C/C++ toolchain; if not installed, try [GCC](https://gcc.gnu.org/) or [Clang](https://releases.llvm.org/download.html)
 
 ### macOS
 
@@ -52,25 +51,20 @@ Oto requires these frameworks:
 
 Add them to "Linked Frameworks and Libraries" on your Xcode project.
 
-### Linux
+### Linux, FreeBSD, OpenBSD
 
-ALSA is required. On Ubuntu or Debian, run this command:
+Oto uses PulseAudio on Linux and BSD systems via the pure-Go package `github.com/jfreymuth/pulse`,
+though BSD systems are not tested well.
 
-```sh
-apt install libasound2-dev
-```
+If the PulseAudio server is not discoverable automatically, set `PULSE_SERVER`.
 
-On RedHat-based linux distributions, run:
+When no PulseAudio server is reachable, Oto falls back to ALSA. This fallback also requires no Cgo:
+`libasound.so.2` is loaded dynamically at runtime, so no ALSA development headers are needed to
+build, though `libasound.so.2` itself must be present at runtime.
 
-```sh
-dnf install alsa-lib-devel
-```
-
-In most cases this command must be run by root user or through `sudo` command.
-
-### FreeBSD, OpenBSD
-
-BSD systems are not tested well. If ALSA works, Oto should work.
+On FreeBSD, building with `CGO_ENABLED=0` (for example when cross-compiling) additionally requires
+`-gcflags="github.com/ebitengine/purego/internal/fakecgo=-std"`; native FreeBSD builds, where Cgo
+is enabled by default, need nothing extra.
 
 ## Usage
 
@@ -136,6 +130,9 @@ func main() {
     }
     // It might take a bit for the hardware audio devices to be ready, so we wait on the channel.
     <-readyChan
+    if err := otoCtx.Err(); err != nil {
+        panic("oto initialization failed: " + err.Error())
+    }
 
     // Create a new 'player' that will handle our sound. Paused by default.
     player := otoCtx.NewPlayer(decodedMp3)
@@ -155,12 +152,6 @@ func main() {
     // }
     // println("Player is now at position:", newPos)
     // player.Play()
-
-    // If you don't want the player/sound anymore simply close
-    err = player.Close()
-    if err != nil {
-        panic("player.Close failed: " + err.Error())
-    }
 }
 ```
 
@@ -216,7 +207,7 @@ doesn't mean they were all played from the audio device.
 
 Data is moved from io.Reader->internal buffer->audio device, and when the internal buffer moves data to the audio device
 is not guaranteed, so there might be a small delay. The amount of data in the buffer can be retrieved
-using `Player.UnplayedBufferSize()`.
+using `Player.BufferedSize()`.
 
 The size of the underlying buffer of a player can also be set by type-asserting the player object:
 
@@ -228,7 +219,8 @@ This works because players implement a `Player` interface and a `BufferSizeSette
 
 ## Crosscompiling
 
-Crosscompiling to macOS or Windows is as easy as setting `GOOS=darwin` or `GOOS=windows`, respectively.
+Crosscompiling to macOS, Windows, Linux or BSD is as easy as setting `GOOS=darwin`, `GOOS=windows`,
+`GOOS=linux` or `GOOS=freebsd` (or your particular BSD flavor) respectively.
 
 To crosscompile for other platforms, make sure the libraries for the target architecture are installed, and set 
 `CGO_ENABLED=1` as Go disables [Cgo](https://golang.org/cmd/cgo/#hdr-Using_cgo_with_the_go_command) on crosscompiles by default.

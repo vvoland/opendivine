@@ -15,10 +15,11 @@
 package graphicscommand
 
 import (
+	"cmp"
 	"fmt"
 	"image"
 	"io"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -59,7 +60,7 @@ func genNextImageID() int {
 
 // NewImage returns a new image.
 //
-// Note that the image is not initialized yet.
+// The pixel data just after NewImage is undetermined.
 func NewImage(width, height int, screenFramebuffer bool, attribute string) *Image {
 	i := &Image{
 		width:     width,
@@ -120,22 +121,22 @@ func (i *Image) InternalSize() (int, int) {
 //
 //	0: Destination X in pixels
 //	1: Destination Y in pixels
-//	2: Source X in texels
-//	3: Source Y in texels
+//	2: Source X in pixels
+//	3: Source Y in pixels
 //	4: Color R [0.0-1.0]
 //	5: Color G
 //	6: Color B
-//	7: Color Y
+//	7: Color A
+//	8: Custom0
+//	9: Custom1
+//	10: Custom2
+//	11: Custom3
 //
-// src and shader are exclusive and only either is non-nil.
+// The elements whose indices are 2 and 3 are used for the source image position.
 //
-// The elements that index is in between 2 and 7 are used for the source images.
-// The source image is 1) src argument if non-nil, or 2) an image value in the uniform variables if it exists.
-// If there are multiple images in the uniform variables, the smallest ID's value is adopted.
-//
-// If the source image is not specified, i.e., src is nil and there is no image in the uniform variables, the
-// elements for the source image are not used.
-func (i *Image) DrawTriangles(srcs [graphics.ShaderSrcImageCount]*Image, vertices []float32, indices []uint32, blend graphicsdriver.Blend, dstRegion image.Rectangle, srcRegions [graphics.ShaderSrcImageCount]image.Rectangle, shader *Shader, uniforms []uint32, fillRule graphicsdriver.FillRule) {
+// If the source image is not specified, i.e., the first element of srcs is nil, the
+// elements for the source image position are passed as they are.
+func (i *Image) DrawTriangles(srcs [graphics.ShaderSrcImageCount]*Image, vertices []float32, indices []uint32, blend graphicsdriver.Blend, dstRegion image.Rectangle, srcRegions [graphics.ShaderSrcImageCount]image.Rectangle, shader *Shader, uniforms []uint32) {
 	for _, src := range srcs {
 		if src == nil {
 			continue
@@ -147,7 +148,7 @@ func (i *Image) DrawTriangles(srcs [graphics.ShaderSrcImageCount]*Image, vertice
 	}
 	i.flushBufferedWritePixels()
 
-	theCommandQueueManager.enqueueDrawTrianglesCommand(i, srcs, vertices, indices, blend, dstRegion, srcRegions, shader, uniforms, fillRule)
+	theCommandQueueManager.enqueueDrawTrianglesCommand(i, srcs, vertices, indices, blend, dstRegion, srcRegions, shader, uniforms)
 }
 
 // ReadPixels reads the image's pixels.
@@ -213,7 +214,7 @@ func (i *Image) dumpTo(w io.Writer, graphicsDriver graphicsdriver.Graphics, blac
 	}
 
 	if blackbg {
-		for i := 0; i < len(pix)/4; i++ {
+		for i := range len(pix) / 4 {
 			pix[4*i+3] = 0xff
 		}
 	}
@@ -230,8 +231,8 @@ func (i *Image) dumpTo(w io.Writer, graphicsDriver graphicsdriver.Graphics, blac
 }
 
 func LogImagesInfo(images []*Image) {
-	sort.Slice(images, func(a, b int) bool {
-		return images[a].id < images[b].id
+	slices.SortFunc(images, func(a, b *Image) int {
+		return cmp.Compare(a.id, b.id)
 	})
 	for _, i := range images {
 		w, h := i.InternalSize()

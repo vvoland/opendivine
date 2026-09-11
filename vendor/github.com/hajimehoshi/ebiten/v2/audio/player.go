@@ -18,15 +18,19 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/hajimehoshi/ebiten/v2/internal/mathutil"
 )
 
 // player is almost the same as the interface oto.Player.
 // This is defined in order to remove the dependency on Oto from this file.
 type player interface {
 	Pause()
+	PauseAndStopReading()
 	Play()
 	IsPlaying() bool
 	Volume() float64
@@ -50,19 +54,19 @@ type playerFactory struct {
 	context    context
 	sampleRate int
 
+	// vmGuest is whether the context is a virtualization guest's virtual device (see the vmaudio
+	// package). It is set when the context is created.
+	vmGuest bool
+
 	m sync.Mutex
 }
 
 var driverForTesting context
 
 func newPlayerFactory(sampleRate int) *playerFactory {
-	f := &playerFactory{
+	return &playerFactory{
 		sampleRate: sampleRate,
 	}
-	if driverForTesting != nil {
-		f.context = driverForTesting
-	}
-	return f
 }
 
 type playerImpl struct {
@@ -75,6 +79,14 @@ type playerImpl struct {
 	factory        *playerFactory
 	initBufferSize int
 	bytesPerSample int
+
+	// volume is the player's volume in the range of [0, math.MaxFloat32].
+	// The value is kept here so that a volume set before the underlying player is created is preserved.
+	volume float64
+
+	// pendingPlay is whether Play was requested before the underlying player was created.
+	// Such a player starts playing once the audio device is created.
+	pendingPlay bool
 
 	// adjustedPosition is the player's more accurate position as time.Duration.
 	// The underlying buffer might not be changed even if the player is playing.
@@ -105,6 +117,7 @@ func (f *playerFactory) newPlayer(context *Context, src io.Reader, seekable bool
 		factory:        f,
 		lastSamples:    -1,
 		bytesPerSample: bitDepthInBytes * channelCount,
+		volume:         1,
 	}
 	// AddCleanup is not set for p. The caller of newPlayer should set a finalizer for p's wrapper.
 	return p, nil
@@ -140,7 +153,7 @@ func (f *playerFactory) error() error {
 	return addErrorInfo(f.context.Err())
 }
 
-func (f *playerFactory) initContextIfNeeded() (<-chan struct{}, error) {
+func (f *playerFactory) initContextIfNeeded(vmGuest bool) (<-chan struct{}, error) {
 	f.m.Lock()
 	defer f.m.Unlock()
 
@@ -148,7 +161,16 @@ func (f *playerFactory) initContextIfNeeded() (<-chan struct{}, error) {
 		return nil, nil
 	}
 
-	c, ready, err := newContext(f.sampleRate)
+	f.vmGuest = vmGuest
+
+	if driverForTesting != nil {
+		f.context = driverForTesting
+		ready := make(chan struct{})
+		close(ready)
+		return ready, nil
+	}
+
+	c, ready, err := newContext(f.sampleRate, vmGuest)
 	if err != nil {
 		return nil, err
 	}
@@ -156,38 +178,93 @@ func (f *playerFactory) initContextIfNeeded() (<-chan struct{}, error) {
 	return ready, nil
 }
 
-func (p *playerImpl) ensurePlayer() error {
-	// Initialize the underlying player lazily to enable calling NewContext in an 'init' function.
-	// Accessing the underlying player functions requires the environment to be already initialized,
-	// but if Ebitengine is used for a shared library, the timing when init functions are called
-	// is unexpectable.
-	// e.g. a variable for JVM on Android might not be set.
-	ready, err := p.factory.initContextIfNeeded()
+func (f *playerFactory) currentContext() context {
+	f.m.Lock()
+	defer f.m.Unlock()
+	return f.context
+}
+
+func (f *playerFactory) isVMGuest() bool {
+	f.m.Lock()
+	defer f.m.Unlock()
+	return f.vmGuest
+}
+
+func (p *playerImpl) ensureStream() error {
+	if p.stream != nil {
+		return nil
+	}
+	s, err := newTimeStream(p.src, p.seekable, p.factory.sampleRate, p.bytesPerSample/channelCount)
 	if err != nil {
 		return err
 	}
-	if ready != nil {
-		go func() {
-			<-ready
-			p.context.setReady()
-		}()
+	p.stream = s
+	return nil
+}
+
+// ensurePlayer creates the underlying player if the audio device exists.
+//
+// The audio device is created lazily from the before-update hook, which runs after the UI
+// backend is initialized. Until then ensurePlayer leaves the underlying player nil, and the
+// caller must record the requested operation (play, volume, position) to apply once the device
+// is created.
+func (p *playerImpl) ensurePlayer() error {
+	if err := p.ensureStream(); err != nil {
+		return err
+	}
+	if p.player != nil {
+		return nil
 	}
 
-	if p.stream == nil {
-		s, err := newTimeStream(p.src, p.seekable, p.factory.sampleRate, p.bytesPerSample/channelCount)
-		if err != nil {
-			return err
-		}
-		p.stream = s
+	c := p.factory.currentContext()
+	if c == nil {
+		return nil
+	}
+
+	pl := c.NewPlayer(p.stream)
+	if p.initBufferSize != 0 {
+		pl.SetBufferSize(p.initBufferSize)
+		p.initBufferSize = 0
+	}
+	pl.SetVolume(p.volume)
+	p.player = pl
+	return nil
+}
+
+// startIfPending starts playing if Play was requested before the audio device was created.
+// startIfPending must not be called with p.m locked.
+func (p *playerImpl) startIfPending() error {
+	p.m.Lock()
+	defer p.m.Unlock()
+
+	if p.closed || !p.pendingPlay {
+		return nil
+	}
+	if err := p.ensurePlayer(); err != nil {
+		return err
 	}
 	if p.player == nil {
-		p.player = p.factory.context.NewPlayer(p.stream)
-		if p.initBufferSize != 0 {
-			p.player.SetBufferSize(p.initBufferSize)
-			p.initBufferSize = 0
-		}
+		// The audio device is not created yet. This is the normal state on every tick between
+		// Play and the first before-update hook (which creates the device); keep the play pending.
+		return nil
 	}
+	if !p.player.IsPlaying() {
+		p.playAndStartStopwatch()
+	}
+	p.pendingPlay = false
 	return nil
+}
+
+// playAndStartStopwatch plays the underlying player and starts the stopwatch only when the player
+// actually started playing. The player can refuse to play, for example when it has already
+// finished its source, and starting the stopwatch then would make the position grow even though
+// nothing is played.
+// playAndStartStopwatch must be called with p.m locked.
+func (p *playerImpl) playAndStartStopwatch() {
+	p.player.Play()
+	if p.player.IsPlaying() {
+		p.stopwatch.start()
+	}
 }
 
 func (p *playerImpl) Play() {
@@ -203,12 +280,26 @@ func (p *playerImpl) Play() {
 		p.context.setError(err)
 		return
 	}
-	if p.player.IsPlaying() {
-		return
+
+	if p.player != nil {
+		p.pendingPlay = false
+		if p.player.IsPlaying() {
+			return
+		}
+		p.playAndStartStopwatch()
+	} else {
+		// The audio device is not created yet. Remember the request and start playing
+		// once the device is created (from the before-update hook).
+		if p.pendingPlay {
+			return
+		}
+		p.pendingPlay = true
 	}
-	p.player.Play()
+	// Add the player to the context. The context's reference guards the player from being
+	// garbage-collected while it is playing, even after all the references to its Player wrapper
+	// are gone (see the Player documentation), and lets the context track and start the player.
+	// The player only needs to be added once; the early returns above avoid redundant adds.
 	p.context.addPlayingPlayer(p)
-	p.stopwatch.start()
 }
 
 func (p *playerImpl) Pause() {
@@ -221,6 +312,11 @@ func (p *playerImpl) Pause() {
 	}
 
 	if p.player == nil {
+		// The audio device is not created yet. Cancel a pending play request if any.
+		if p.pendingPlay {
+			p.pendingPlay = false
+			p.context.removePlayingPlayer(p)
+		}
 		return
 	}
 	if !p.player.IsPlaying() {
@@ -228,6 +324,32 @@ func (p *playerImpl) Pause() {
 	}
 
 	p.player.Pause()
+	p.context.removePlayingPlayer(p)
+	p.stopwatch.stop()
+}
+
+func (p *playerImpl) PauseAndStopReading() {
+	p.m.Lock()
+	defer p.m.Unlock()
+
+	if p.closed {
+		p.context.setError(fmt.Errorf("audio: PauseAndStopReading for a closed player"))
+		return
+	}
+
+	if p.player == nil {
+		// The audio device is not created yet, so the source has not been read.
+		// Cancel a pending play request if any.
+		if p.pendingPlay {
+			p.pendingPlay = false
+			p.context.removePlayingPlayer(p)
+		}
+		return
+	}
+
+	// The underlying player keeps reading the source even while paused, so it must be told to stop
+	// regardless of the playing state.
+	p.player.PauseAndStopReading()
 	p.context.removePlayingPlayer(p)
 	p.stopwatch.stop()
 }
@@ -244,18 +366,31 @@ func (p *playerImpl) IsPlaying() bool {
 
 func (p *playerImpl) isPlaying() bool {
 	if p.player == nil {
-		return false
+		return p.pendingPlay
 	}
 	return p.player.IsPlaying()
+}
+
+// removeFromContextIfNotPlaying removes the player from the context's playing players unless the
+// player is still playing. The check and the removal are atomic with respect to Play, so that a
+// player restarted concurrently stays tracked by the context.
+// removeFromContextIfNotPlaying must not be called with p.m locked.
+func (p *playerImpl) removeFromContextIfNotPlaying() {
+	p.m.Lock()
+	defer p.m.Unlock()
+
+	if !p.closed && p.isPlaying() {
+		return
+	}
+	p.context.removePlayingPlayer(p)
 }
 
 func (p *playerImpl) Volume() float64 {
 	p.m.Lock()
 	defer p.m.Unlock()
 
-	if err := p.ensurePlayer(); err != nil {
-		p.context.setError(err)
-		return 0
+	if p.player == nil {
+		return p.volume
 	}
 	return p.player.Volume()
 }
@@ -264,11 +399,16 @@ func (p *playerImpl) SetVolume(volume float64) {
 	p.m.Lock()
 	defer p.m.Unlock()
 
-	if err := p.ensurePlayer(); err != nil {
-		p.context.setError(err)
-		return
+	// Not every audio device normalizes the volume: a virtualization guest's virtual device just
+	// records it, and Volume returns this value before the audio device is created.
+	// !(volume > 0) is true for NaN as well as for negative values.
+	if !(volume > 0) || volume > math.MaxFloat32 {
+		volume = 0
 	}
-	p.player.SetVolume(volume)
+	p.volume = volume
+	if p.player != nil {
+		p.player.SetVolume(volume)
+	}
 }
 
 func (p *playerImpl) Close() error {
@@ -279,12 +419,20 @@ func (p *playerImpl) Close() error {
 		return fmt.Errorf("audio: player is already closed")
 	}
 	p.closed = true
+	p.pendingPlay = false
+
+	p.context.removePlayingPlayer(p)
 
 	if p.player != nil {
 		defer func() {
 			p.player = nil
 		}()
-		p.player.Pause()
+		p.player.PauseAndStopReading()
+		// Release the device player if it holds resources beyond this process (the
+		// virtualization guest's forwarded player).
+		if closer, ok := p.player.(io.Closer); ok {
+			_ = closer.Close()
+		}
 		p.stopwatch.stop()
 	}
 	return nil
@@ -312,19 +460,43 @@ func (p *playerImpl) SetPosition(offset time.Duration) error {
 		return fmt.Errorf("audio: player is already closed")
 	}
 
-	if offset == 0 && p.player == nil {
+	if p.player != nil {
+		// The device is available. Seek via the underlying player so that its buffer is reset.
+		pos := p.stream.timeDurationToPos(offset)
+		if _, err := p.player.Seek(pos, io.SeekStart); err != nil {
+			return addErrorInfo(err)
+		}
+		p.afterSeek()
+		return nil
+	}
+
+	// The audio device is not created yet. Record the position by seeking the stream so that
+	// the underlying player starts from this position once it is created.
+
+	// Seeking to the start before the stream is created needs no source access.
+	if offset == 0 && p.stream == nil {
 		p.adjustedPosition = 0
 		return nil
 	}
 
-	if err := p.ensurePlayer(); err != nil {
+	if err := p.ensureStream(); err != nil {
 		return err
 	}
 
-	pos := p.stream.timeDurationToPos(offset)
-	if _, err := p.player.Seek(pos, io.SeekStart); err != nil {
-		return addErrorInfo(err)
+	// A non-seekable stream is always at the beginning since the player has not read it yet,
+	// so seeking to 0 is unnecessary. A non-zero offset requires a seek, which panics for a
+	// non-seekable source as documented.
+	if offset != 0 || p.seekable {
+		pos := p.stream.timeDurationToPos(offset)
+		if _, err := p.stream.Seek(pos, io.SeekStart); err != nil {
+			return addErrorInfo(err)
+		}
 	}
+	p.afterSeek()
+	return nil
+}
+
+func (p *playerImpl) afterSeek() {
 	p.lastSamples = -1
 	// Just after setting a position, the buffer size should be 0 as no data is sent.
 	p.adjustedPosition = int64(p.stream.positionInTimeDuration())
@@ -332,7 +504,6 @@ func (p *playerImpl) SetPosition(offset time.Duration) error {
 	if p.isPlaying() {
 		p.stopwatch.start()
 	}
-	return nil
 }
 
 func (p *playerImpl) Err() error {
@@ -354,13 +525,25 @@ func (p *playerImpl) SetBufferSize(bufferSize time.Duration) {
 		return
 	}
 
-	bufferSizeInBytes := int(bufferSize * time.Duration(p.bytesPerSample) * time.Duration(p.factory.sampleRate) / time.Second)
-	bufferSizeInBytes = bufferSizeInBytes / p.bytesPerSample * p.bytesPerSample
+	sizeInBytes := bufferSizeInBytes(bufferSize, p.bytesPerSample, p.factory.sampleRate)
 	if p.player == nil {
-		p.initBufferSize = bufferSizeInBytes
+		p.initBufferSize = sizeInBytes
 		return
 	}
-	p.player.SetBufferSize(bufferSizeInBytes)
+	p.player.SetBufferSize(sizeInBytes)
+}
+
+func bufferSizeInBytes(bufferSize time.Duration, bytesPerSample, sampleRate int) int {
+	if bufferSize <= 0 {
+		return 0
+	}
+
+	size := mathutil.MulDiv(int64(bufferSize), int64(bytesPerSample)*int64(sampleRate), int64(time.Second))
+	if size > int64(math.MaxInt) {
+		return 0
+	}
+	size = size / int64(bytesPerSample) * int64(bytesPerSample)
+	return int(size)
 }
 
 func (p *playerImpl) sourceIdent() any {
@@ -394,7 +577,8 @@ func (p *playerImpl) updatePosition() {
 	defer p.m.Unlock()
 
 	if p.player == nil {
-		p.adjustedPosition = 0
+		// The underlying player is not created yet. Keep the position recorded by
+		// SetPosition (0 by default) until the player starts.
 		return
 	}
 	if !p.context.IsReady() {
@@ -408,7 +592,18 @@ func (p *playerImpl) updatePosition() {
 	if p.lastSamples >= 0 && p.lastSamples == samples {
 		// If the number of samples is not changed from the last tick,
 		// the underlying buffer is not updated yet. Adjust the position by the time (#2901).
-		adjustingTime = p.stopwatch.current()
+		// A virtualization guest's device consumes the sources only as the host pulls them, not
+		// in real time, so the consumed samples are already the exact position there.
+		if !p.factory.isVMGuest() {
+			// If the player is not actually playing (for example, it has finished its source or
+			// it has been paused), stop the stopwatch so that the last adjustment is retained
+			// without growing further. Otherwise the position would keep growing while the
+			// samples stay constant.
+			if !p.isPlaying() {
+				p.stopwatch.stop()
+			}
+			adjustingTime = p.stopwatch.current()
+		}
 	} else {
 		p.lastSamples = samples
 		p.stopwatch.reset()
@@ -418,7 +613,7 @@ func (p *playerImpl) updatePosition() {
 	}
 
 	// Update the adjusted position every tick. This is necessary to keep the position accurate.
-	p.adjustedPosition = int64(time.Duration(samples)*time.Second/time.Duration(p.factory.sampleRate) + adjustingTime)
+	p.adjustedPosition = mathutil.MulDiv(samples, int64(time.Second), int64(p.factory.sampleRate)) + int64(adjustingTime)
 }
 
 type timeStream struct {
@@ -447,7 +642,7 @@ func newTimeStream(r io.Reader, seekable bool, sampleRate int, bitDepthInBytes i
 			if !errors.Is(err, errors.ErrUnsupported) {
 				return nil, err
 			}
-			// Ignore the error, as the undelrying source might not support Seek (#3192).
+			// Ignore the error, as the underlying source might not support Seek (#3192).
 			// This happens when vorbis.Decode* is used, as vorbis.Stream is io.Seeker whichever the underlying source is.
 			pos = 0
 		}
@@ -483,7 +678,8 @@ func (s *timeStream) Seek(offset int64, whence int) (int64, error) {
 }
 
 func (s *timeStream) timeDurationToPos(offset time.Duration) int64 {
-	o := int64(offset) * int64(s.bytesPerSample) * int64(s.sampleRate) / int64(time.Second)
+	bytesPerSecond := int64(s.bytesPerSample) * int64(s.sampleRate)
+	o := mathutil.MulDiv(int64(offset), bytesPerSecond, int64(time.Second))
 
 	// Align the byte position with the samples.
 	o -= o % int64(s.bytesPerSample)
@@ -497,5 +693,6 @@ func (s *timeStream) position() int64 {
 }
 
 func (s *timeStream) positionInTimeDuration() time.Duration {
-	return time.Duration(s.pos.Load()) * time.Second / (time.Duration(s.sampleRate * s.bytesPerSample))
+	bytesPerSecond := int64(s.sampleRate) * int64(s.bytesPerSample)
+	return time.Duration(mathutil.MulDiv(s.pos.Load(), int64(time.Second), bytesPerSecond))
 }

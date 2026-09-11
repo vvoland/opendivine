@@ -32,7 +32,6 @@ const (
 type compileContext struct {
 	structNames map[string]string
 	structTypes []shaderir.Type
-	unit        shaderir.Unit
 }
 
 func (c *compileContext) structName(p *shaderir.Program, t *shaderir.Type) string {
@@ -52,21 +51,22 @@ func (c *compileContext) structName(p *shaderir.Program, t *shaderir.Type) strin
 	return n
 }
 
-const utilFuncs = `float mod(float x, float y) {
-	return x - y * floor(x/y);
-}
+// The macros below evaluate their arguments more than once. This is safe as expressions in
+// the shader IR have no side effects: there are no pointers or writable global variables,
+// and a call to a function with output parameters is always a statement rather than a part
+// of an expression.
+const utilFuncs = `// mod and modInt are macros rather than functions. Some HLSL compilers cannot
+// resolve overloads on the vector size, as a scalar argument is implicitly convertible
+// to any vector type (#3356).
 
-float2 mod(float2 x, float2 y) {
-	return x - y * floor(x/y);
-}
+// mod is a floored modulo like GLSL's mod. HLSL's fmod is a truncated modulo.
+#define mod(x, y) ((x) - (y) * floor((x) / (y)))
 
-float3 mod(float3 x, float3 y) {
-	return x - y * floor(x/y);
-}
-
-float4 mod(float4 x, float4 y) {
-	return x - y * floor(x/y);
-}
+// modInt is a truncated modulo like the '%' operator. fxc emits warning X3556 for signed
+// integer % and /, and suggests uints, so the magnitude is computed with unsigned modulo
+// and the sign of the dividend is reapplied. This matches '%' except for the minimum
+// integer, where abs overflows.
+#define modInt(x, y) (sign(x) * asint(asuint(abs(x)) % asuint(abs(y))))
 
 float2x2 float2x2FromScalar(float x) {
 	return float2x2(x, 0, 0, x);
@@ -83,9 +83,7 @@ float4x4 float4x4FromScalar(float x) {
 func Compile(p *shaderir.Program) (vertexShader, pixelShader, vertexPrelude, pixelPrelude string) {
 	offsets := UniformVariableOffsetsInDwords(p)
 
-	c := &compileContext{
-		unit: p.Unit,
-	}
+	c := &compileContext{}
 
 	appendPrelude := func(lines []string, vertex bool) []string {
 		lines = append(lines, strings.Split(utilFuncs, "\n")...)
@@ -150,9 +148,6 @@ func Compile(p *shaderir.Program) (vertexShader, pixelShader, vertexPrelude, pix
 			for i := 0; i < p.TextureCount; i++ {
 				lines = append(lines, fmt.Sprintf("Texture2D T%[1]d : register(t%[1]d);", i))
 			}
-			if c.unit == shaderir.Texels {
-				lines = append(lines, "SamplerState samp : register(s0);")
-			}
 		}
 		return lines
 	}
@@ -166,7 +161,6 @@ func Compile(p *shaderir.Program) (vertexShader, pixelShader, vertexPrelude, pix
 		// Use all the functions for testing.
 		vsfuncs = make([]*shaderir.Func, 0, len(p.Funcs))
 		for _, f := range p.Funcs {
-			f := f
 			vsfuncs = append(vsfuncs, &f)
 		}
 	}
@@ -218,7 +212,6 @@ func Compile(p *shaderir.Program) (vertexShader, pixelShader, vertexPrelude, pix
 		// Use all the functions for testing.
 		psfuncs = make([]*shaderir.Func, 0, len(p.Funcs))
 		for _, f := range p.Funcs {
-			f := f
 			psfuncs = append(psfuncs, &f)
 		}
 	}
@@ -468,7 +461,7 @@ func (c *compileContext) block(p *shaderir.Program, topBlock, block *shaderir.Bl
 		case shaderir.Unary:
 			var op string
 			switch e.Op {
-			case shaderir.Add, shaderir.Sub, shaderir.NotOp:
+			case shaderir.Add, shaderir.Sub, shaderir.NotOp, shaderir.ComplementOp:
 				op = opString(e.Op)
 			default:
 				op = fmt.Sprintf("?(unexpected op: %d)", e.Op)
@@ -484,6 +477,11 @@ func (c *compileContext) block(p *shaderir.Program, topBlock, block *shaderir.Bl
 				// If either is a matrix, use the mul function.
 				// Swap the order of the lhs and the rhs since matrices are row-major in HLSL.
 				return fmt.Sprintf("mul(%s, %s)", expr(&e.Exprs[1]), expr(&e.Exprs[0]))
+			case shaderir.ModOp:
+				// Use modInt instead of '%' to avoid fxc's warning X3556 for signed integers.
+				return fmt.Sprintf("modInt((%s), (%s))", expr(&e.Exprs[0]), expr(&e.Exprs[1]))
+			case shaderir.AndNot:
+				return fmt.Sprintf("(%s) & ~(%s)", expr(&e.Exprs[0]), expr(&e.Exprs[1]))
 			}
 			return fmt.Sprintf("(%s) %s (%s)", expr(&e.Exprs[0]), opString(e.Op), expr(&e.Exprs[1]))
 		case shaderir.Selection:
@@ -516,14 +514,8 @@ func (c *compileContext) block(p *shaderir.Program, topBlock, block *shaderir.Bl
 						return fmt.Sprintf("float4x4FromScalar(%s)", args[0])
 					}
 				case shaderir.TexelAt:
-					switch c.unit {
-					case shaderir.Pixels:
-						return fmt.Sprintf("%s.Load(int3(%s, 0))", args[0], strings.Join(args[1:], ", "))
-					case shaderir.Texels:
-						return fmt.Sprintf("%s.Sample(samp, %s)", args[0], strings.Join(args[1:], ", "))
-					default:
-						panic(fmt.Sprintf("hlsl: unexpected unit: %d", p.Unit))
-					}
+					// Floor the position so that a negative position is out of the texture.
+					return fmt.Sprintf("%s.Load(int3(int2(floor(%s)), 0))", args[0], strings.Join(args[1:], ", "))
 				}
 			}
 			if callee.Type == shaderir.BuiltinFuncExpr && (callee.BuiltinFunc == shaderir.Min || callee.BuiltinFunc == shaderir.Max) {

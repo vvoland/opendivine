@@ -34,20 +34,48 @@ type Monitor struct {
 	name               string
 	boundsInGLFWPixels image.Rectangle
 	contentScale       float64
+
+	// virtual provides the monitor's values when the monitor has no backing glfw.Monitor (a
+	// virtualization guest's monitor). It is nil for a real monitor.
+	virtual virtualMonitorSource
+}
+
+// virtualMonitorSource provides the values of a monitor that has no backing glfw.Monitor.
+type virtualMonitorSource interface {
+	deviceScaleFactor() float64
+	outsideSize() (width, height float64)
 }
 
 // Name returns the monitor's name.
 func (m *Monitor) Name() string {
+	if m.virtual != nil {
+		return ""
+	}
 	return m.name
 }
 
 // DeviceScaleFactor is concurrent-safe as contentScale is immutable.
 func (m *Monitor) DeviceScaleFactor() float64 {
+	if m.virtual != nil {
+		return m.virtual.deviceScaleFactor()
+	}
 	return m.contentScale
+}
+
+// RefreshRate returns the monitor's refresh rate in Hz. It returns 0 when the rate is unknown.
+func (m *Monitor) RefreshRate() int {
+	if m.videoMode == nil {
+		return 0
+	}
+	return m.videoMode.RefreshRate
 }
 
 // Size returns the size of the monitor in device-independent pixels.
 func (m *Monitor) Size() (int, int) {
+	if m.virtual != nil {
+		w, h := m.virtual.outsideSize()
+		return int(w), int(h)
+	}
 	w, h := m.sizeInDIP()
 	return int(w), int(h)
 }
@@ -64,7 +92,7 @@ type monitors struct {
 	// monitor config change event.
 	monitors []*Monitor
 
-	m sync.Mutex
+	mu sync.Mutex
 
 	updateCalled atomic.Bool
 }
@@ -76,8 +104,8 @@ func (m *monitors) append(ms []*Monitor) []*Monitor {
 		panic("ui: (*monitors).update must be called before (*monitors).append is called")
 	}
 
-	m.m.Lock()
-	defer m.m.Unlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 
 	return append(ms, m.monitors...)
 }
@@ -86,8 +114,8 @@ func (m *monitors) contains(monitor *Monitor) bool {
 	if !m.updateCalled.Load() {
 		return false
 	}
-	m.m.Lock()
-	defer m.m.Unlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	return slices.Contains(m.monitors, monitor)
 }
 
@@ -96,8 +124,8 @@ func (m *monitors) primaryMonitor() *Monitor {
 		panic("ui: (*monitors).update must be called before (*monitors).primaryMonitor is called")
 	}
 
-	m.m.Lock()
-	defer m.m.Unlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 
 	// GetMonitors might return nil in theory (#1878, #1887, #3241).
 	// primaryMonitor can be called at the initialization, so monitors can be nil.
@@ -111,8 +139,8 @@ func (m *monitors) primaryMonitor() *Monitor {
 // or returns nil if monitor is not found.
 // The position is in GLFW pixels.
 func (m *monitors) monitorFromPosition(x, y int) *Monitor {
-	m.m.Lock()
-	defer m.m.Unlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 
 	for _, m := range m.monitors {
 		// Use an inclusive range. On macOS, the cursor position can take this range (#2794).
@@ -140,9 +168,9 @@ func (m *monitors) update() error {
 		// TODO: Detect the update of the content scale by SetContentScaleCallback (#2343).
 		contentScale := 1.0
 
-		// Keep calling GetContentScale until the returned scale is 0 (#2051).
+		// Keep calling GetContentScale until the returned scale is not 0 (#2051).
 		// Retry this at most 5 times to avoid an infinite loop.
-		for i := 0; i < 5; i++ {
+		for range 5 {
 			// An error can happen e.g. when entering a screensaver on Windows (#2488).
 			sx, _, err := m.GetContentScale()
 			if err != nil {
@@ -178,9 +206,9 @@ func (m *monitors) update() error {
 		})
 	}
 
-	m.m.Lock()
+	m.mu.Lock()
 	m.monitors = newMonitors
-	m.m.Unlock()
+	m.mu.Unlock()
 
 	m.updateCalled.Store(true)
 	return nil

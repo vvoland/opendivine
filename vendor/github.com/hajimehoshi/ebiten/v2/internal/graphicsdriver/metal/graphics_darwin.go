@@ -15,16 +15,18 @@
 package metal
 
 import (
+	"cmp"
 	"fmt"
 	"image"
 	"math"
 	"runtime"
-	"sort"
+	"slices"
 	"unsafe"
 
 	"github.com/ebitengine/purego/objc"
 
 	"github.com/hajimehoshi/ebiten/v2/internal/cocoa"
+	"github.com/hajimehoshi/ebiten/v2/internal/color"
 	"github.com/hajimehoshi/ebiten/v2/internal/graphics"
 	"github.com/hajimehoshi/ebiten/v2/internal/graphicsdriver"
 	"github.com/hajimehoshi/ebiten/v2/internal/graphicsdriver/metal/ca"
@@ -37,12 +39,11 @@ var sel_supportsFamily = objc.RegisterName("supportsFamily:")
 type Graphics struct {
 	view view
 
-	colorSpace graphicsdriver.ColorSpace
+	colorSpace color.ColorSpace
 
-	cq   mtl.CommandQueue
-	cb   mtl.CommandBuffer
-	rce  mtl.RenderCommandEncoder
-	dsss map[stencilMode]mtl.DepthStencilState
+	cq  mtl.CommandQueue
+	cb  mtl.CommandBuffer
+	rce mtl.RenderCommandEncoder
 
 	screenDrawable ca.MetalDrawable
 
@@ -57,8 +58,7 @@ type Graphics struct {
 	buffers       map[int64][]mtl.Buffer
 	unusedBuffers map[mtl.Buffer]struct{}
 
-	lastDst      *Image
-	lastFillRule graphicsdriver.FillRule
+	lastDst *Image
 
 	vb mtl.Buffer
 	ib mtl.Buffer
@@ -102,7 +102,7 @@ func init() {
 
 // NewGraphics creates an implementation of graphicsdriver.Graphics for Metal.
 // The returned graphics value is nil iff the error is not nil.
-func NewGraphics(colorSpace graphicsdriver.ColorSpace) (graphicsdriver.Graphics, error) {
+func NewGraphics(colorSpace color.ColorSpace) (graphicsdriver.Graphics, error) {
 	// On old mac devices like iMac 2011, Metal is not supported (#779).
 	// TODO: Is there a better way to check whether Metal is available or not?
 	// It seems OK to call MTLCreateSystemDefaultDevice multiple times, so this should be fine.
@@ -118,16 +118,22 @@ func NewGraphics(colorSpace graphicsdriver.ColorSpace) (graphicsdriver.Graphics,
 		// Initializing a Metal device and a layer must be done in the main thread on macOS.
 		// Note that this assumes NewGraphics is called on the main thread on desktops.
 		if err := g.view.initialize(systemDefaultDevice, colorSpace); err != nil {
+			g.view.release()
 			return nil, err
 		}
 	}
 	return g, nil
 }
 
+func (g *Graphics) ColorSpace() color.ColorSpace {
+	return g.colorSpace
+}
+
 func (g *Graphics) Begin() error {
 	// NSAutoreleasePool is required to release drawable correctly (#847).
 	// https://developer.apple.com/library/archive/documentation/3DDrawing/Conceptual/MTLBestPracticesGuide/Drawables.html
 	g.pool = cocoa.NSAutoreleasePool_new()
+	g.view.updatePresentationState()
 	return nil
 }
 
@@ -138,6 +144,8 @@ func (g *Graphics) End(present bool) error {
 	if present {
 		g.frame++
 	}
+	// Reclaim the resources for the past frames here, as a drawable is not always obtained in a frame.
+	g.gcBuffers()
 	return nil
 }
 
@@ -147,8 +155,18 @@ func (g *Graphics) SetWindow(window uintptr) {
 	g.view.setWindow(window)
 }
 
+// SetMainThreadRunner sets a function that runs the given function on the main thread synchronously.
+//
+// The runner must be able to run a function even while the main thread is blocked until the
+// current frame ends, like during window resizing.
+func (g *Graphics) SetMainThreadRunner(f func(func())) {
+	g.view.runOnMainThread = f
+}
+
+// SetUIView sets the UIView the game is rendered into.
+//
+// SetUIView is concurrent safe.
 func (g *Graphics) SetUIView(uiview uintptr) {
-	// TODO: Should this be called on the main thread?
 	g.view.setUIView(uiview)
 }
 
@@ -166,23 +184,23 @@ func pow2(x uintptr) uintptr {
 
 func (g *Graphics) gcBuffers() {
 loop:
-	for frame, bs := range g.buffers {
+	for frame, cbs := range g.frameToCB {
 		if frame == g.frame {
 			continue
 		}
 
 		// Check if all command buffers for the frame are completed.
-		for _, cb := range g.frameToCB[frame] {
+		for _, cb := range cbs {
 			if cb.Status() != mtl.CommandBufferStatusCompleted {
 				continue loop
 			}
 		}
-		for _, cb := range g.frameToCB[frame] {
+		for _, cb := range cbs {
 			cb.Release()
 		}
 		delete(g.frameToCB, frame)
 
-		for _, b := range bs {
+		for _, b := range g.buffers[frame] {
 			if g.unusedBuffers == nil {
 				g.unusedBuffers = map[mtl.Buffer]struct{}{}
 			}
@@ -197,8 +215,8 @@ loop:
 		for b := range g.unusedBuffers {
 			bufs = append(bufs, b)
 		}
-		sort.Slice(bufs, func(a, b int) bool {
-			return bufs[a].Length() > bufs[b].Length()
+		slices.SortFunc(bufs, func(a, b mtl.Buffer) int {
+			return cmp.Compare(b.Length(), a.Length())
 		})
 		for _, b := range bufs[maxUnusedBuffers:] {
 			delete(g.unusedBuffers, b)
@@ -266,13 +284,23 @@ func (g *Graphics) flushCommandBufferIfNeeded(present bool) {
 	g.flushRenderCommandEncoderIfNeeded()
 
 	var presented bool
+	var drawableToPresentWithTransaction ca.MetalDrawable
 	if present && g.screenDrawable != (ca.MetalDrawable{}) {
-		g.cb.PresentDrawable(g.screenDrawable)
+		if g.view.shouldPresentWithTransaction() {
+			// The drawable must be presented after the command buffer is committed and scheduled.
+			drawableToPresentWithTransaction = g.screenDrawable
+		} else {
+			g.view.presentDrawable(g.cb, g.screenDrawable)
+		}
 		g.screenDrawable = ca.MetalDrawable{}
 		presented = true
 	}
 
 	g.cb.Commit()
+
+	if drawableToPresentWithTransaction != (ca.MetalDrawable{}) {
+		g.view.presentDrawableWithTransaction(g.cb, drawableToPresentWithTransaction)
+	}
 
 	for _, t := range g.tmpTextures {
 		t.Release()
@@ -412,16 +440,6 @@ func blendOperationToMetalBlendOperation(o graphicsdriver.BlendOperation) mtl.Bl
 }
 
 func (g *Graphics) Initialize() error {
-	// Creating *State objects are expensive and reuse them whenever possible.
-	// See https://developer.apple.com/library/archive/documentation/Miscellaneous/Conceptual/MetalProgrammingGuide/Cmd-Submiss/Cmd-Submiss.html
-
-	for _, dss := range g.dsss {
-		dss.Release()
-	}
-	if g.dsss == nil {
-		g.dsss = map[stencilMode]mtl.DepthStencilState{}
-	}
-
 	if runtime.GOOS == "ios" {
 		// Initializing a Metal device and a layer must be done in the render thread on iOS.
 		if err := g.view.initialize(systemDefaultDevice, g.colorSpace); err != nil {
@@ -432,64 +450,6 @@ func (g *Graphics) Initialize() error {
 	// To avoid confusion, let's call this explicitly.
 	// [1] https://developer.apple.com/documentation/quartzcore/calayer/isopaque?language=objc
 	g.view.ml.SetOpaque(!g.transparent)
-
-	// The stencil reference value is always 0 (default).
-	g.dsss[noStencil] = g.view.getMTLDevice().NewDepthStencilStateWithDescriptor(mtl.DepthStencilDescriptor{
-		BackFaceStencil: mtl.StencilDescriptor{
-			StencilFailureOperation:   mtl.StencilOperationKeep,
-			DepthFailureOperation:     mtl.StencilOperationKeep,
-			DepthStencilPassOperation: mtl.StencilOperationKeep,
-			StencilCompareFunction:    mtl.CompareFunctionAlways,
-		},
-		FrontFaceStencil: mtl.StencilDescriptor{
-			StencilFailureOperation:   mtl.StencilOperationKeep,
-			DepthFailureOperation:     mtl.StencilOperationKeep,
-			DepthStencilPassOperation: mtl.StencilOperationKeep,
-			StencilCompareFunction:    mtl.CompareFunctionAlways,
-		},
-	})
-	g.dsss[incrementStencil] = g.view.getMTLDevice().NewDepthStencilStateWithDescriptor(mtl.DepthStencilDescriptor{
-		BackFaceStencil: mtl.StencilDescriptor{
-			StencilFailureOperation:   mtl.StencilOperationKeep,
-			DepthFailureOperation:     mtl.StencilOperationKeep,
-			DepthStencilPassOperation: mtl.StencilOperationDecrementWrap,
-			StencilCompareFunction:    mtl.CompareFunctionAlways,
-		},
-		FrontFaceStencil: mtl.StencilDescriptor{
-			StencilFailureOperation:   mtl.StencilOperationKeep,
-			DepthFailureOperation:     mtl.StencilOperationKeep,
-			DepthStencilPassOperation: mtl.StencilOperationIncrementWrap,
-			StencilCompareFunction:    mtl.CompareFunctionAlways,
-		},
-	})
-	g.dsss[invertStencil] = g.view.getMTLDevice().NewDepthStencilStateWithDescriptor(mtl.DepthStencilDescriptor{
-		BackFaceStencil: mtl.StencilDescriptor{
-			StencilFailureOperation:   mtl.StencilOperationKeep,
-			DepthFailureOperation:     mtl.StencilOperationKeep,
-			DepthStencilPassOperation: mtl.StencilOperationInvert,
-			StencilCompareFunction:    mtl.CompareFunctionAlways,
-		},
-		FrontFaceStencil: mtl.StencilDescriptor{
-			StencilFailureOperation:   mtl.StencilOperationKeep,
-			DepthFailureOperation:     mtl.StencilOperationKeep,
-			DepthStencilPassOperation: mtl.StencilOperationInvert,
-			StencilCompareFunction:    mtl.CompareFunctionAlways,
-		},
-	})
-	g.dsss[drawWithStencil] = g.view.getMTLDevice().NewDepthStencilStateWithDescriptor(mtl.DepthStencilDescriptor{
-		BackFaceStencil: mtl.StencilDescriptor{
-			StencilFailureOperation:   mtl.StencilOperationKeep,
-			DepthFailureOperation:     mtl.StencilOperationKeep,
-			DepthStencilPassOperation: mtl.StencilOperationKeep,
-			StencilCompareFunction:    mtl.CompareFunctionNotEqual,
-		},
-		FrontFaceStencil: mtl.StencilDescriptor{
-			StencilFailureOperation:   mtl.StencilOperationKeep,
-			DepthFailureOperation:     mtl.StencilOperationKeep,
-			DepthStencilPassOperation: mtl.StencilOperationKeep,
-			StencilCompareFunction:    mtl.CompareFunctionNotEqual,
-		},
-	})
 
 	g.cq = g.view.getMTLDevice().NewCommandQueue()
 	return nil
@@ -504,7 +464,7 @@ func (g *Graphics) flushRenderCommandEncoderIfNeeded() {
 	g.lastDst = nil
 }
 
-func (g *Graphics) draw(dst *Image, dstRegions []graphicsdriver.DstRegion, srcs [graphics.ShaderSrcImageCount]*Image, indexOffset int, shader *Shader, uniforms []uint32, blend graphicsdriver.Blend, fillRule graphicsdriver.FillRule) error {
+func (g *Graphics) draw(dst *Image, dstRegions []graphicsdriver.DstRegion, srcs [graphics.ShaderSrcImageCount]*Image, indexOffset int, shader *Shader, uniforms []uint32, blend graphicsdriver.Blend) error {
 	// In order to create a separate command buffer for the screen, flush the current command buffer.
 	// It's because a drawable will not be released as long as the CommandBuffer referencing it is alive,
 	// it is more efficient to separate CommandBuffers that use the drawable from those that do not.
@@ -515,14 +475,13 @@ func (g *Graphics) draw(dst *Image, dstRegions []graphicsdriver.DstRegion, srcs 
 	// When preparing a stencil buffer, flush the current render command encoder
 	// to make sure the stencil buffer is cleared when loading.
 	// TODO: What about clearing the stencil buffer by vertices?
-	if g.lastDst != dst || g.lastFillRule != fillRule || fillRule != graphicsdriver.FillRuleFillAll {
+	if g.lastDst != dst {
 		g.flushRenderCommandEncoderIfNeeded()
 	}
 	g.lastDst = dst
-	g.lastFillRule = fillRule
 
 	if g.rce == (mtl.RenderCommandEncoder{}) {
-		rpd := mtl.RenderPassDescriptor{}
+		var rpd mtl.RenderPassDescriptor
 		// Even though the destination pixels are not used, mtl.LoadActionDontCare might cause glitches
 		// (#1019). Always using mtl.LoadActionLoad is safe.
 		if dst.screen {
@@ -540,13 +499,6 @@ func (g *Graphics) draw(dst *Image, dstRegions []graphicsdriver.DstRegion, srcs 
 		}
 		rpd.ColorAttachments[0].Texture = t
 		rpd.ColorAttachments[0].ClearColor = mtl.ClearColor{}
-
-		if fillRule != graphicsdriver.FillRuleFillAll {
-			dst.ensureStencil()
-			rpd.StencilAttachment.LoadAction = mtl.LoadActionClear
-			rpd.StencilAttachment.StoreAction = mtl.StoreActionDontCare
-			rpd.StencilAttachment.Texture = dst.stencil
-		}
 
 		g.ensureCommandBuffer()
 		g.rce = g.cb.RenderCommandEncoderWithDescriptor(rpd)
@@ -578,39 +530,11 @@ func (g *Graphics) draw(dst *Image, dstRegions []graphicsdriver.DstRegion, srcs 
 		}
 	}
 
-	var (
-		noStencilRpss        mtl.RenderPipelineState
-		incrementStencilRpss mtl.RenderPipelineState
-		invertStencilRpss    mtl.RenderPipelineState
-		drawWithStencilRpss  mtl.RenderPipelineState
-	)
-	switch fillRule {
-	case graphicsdriver.FillRuleFillAll:
-		s, err := shader.RenderPipelineState(&g.view, blend, noStencil, dst.screen)
-		if err != nil {
-			return err
-		}
-		noStencilRpss = s
-	case graphicsdriver.FillRuleNonZero:
-		s, err := shader.RenderPipelineState(&g.view, blend, incrementStencil, dst.screen)
-		if err != nil {
-			return err
-		}
-		incrementStencilRpss = s
-	case graphicsdriver.FillRuleEvenOdd:
-		s, err := shader.RenderPipelineState(&g.view, blend, invertStencil, dst.screen)
-		if err != nil {
-			return err
-		}
-		invertStencilRpss = s
+	s, err := shader.RenderPipelineState(&g.view, blend, dst.screen)
+	if err != nil {
+		return err
 	}
-	if fillRule != graphicsdriver.FillRuleFillAll {
-		s, err := shader.RenderPipelineState(&g.view, blend, drawWithStencil, dst.screen)
-		if err != nil {
-			return err
-		}
-		drawWithStencilRpss = s
-	}
+	rps := s
 
 	for _, dstRegion := range dstRegions {
 		g.rce.SetScissorRect(mtl.ScissorRect{
@@ -620,25 +544,8 @@ func (g *Graphics) draw(dst *Image, dstRegions []graphicsdriver.DstRegion, srcs 
 			Height: dstRegion.Region.Dy(),
 		})
 
-		switch fillRule {
-		case graphicsdriver.FillRuleFillAll:
-			g.rce.SetDepthStencilState(g.dsss[noStencil])
-			g.rce.SetRenderPipelineState(noStencilRpss)
-			g.rce.DrawIndexedPrimitives(mtl.PrimitiveTypeTriangle, dstRegion.IndexCount, mtl.IndexTypeUInt32, g.ib, indexOffset*int(unsafe.Sizeof(uint32(0))))
-		case graphicsdriver.FillRuleNonZero:
-			g.rce.SetDepthStencilState(g.dsss[incrementStencil])
-			g.rce.SetRenderPipelineState(incrementStencilRpss)
-			g.rce.DrawIndexedPrimitives(mtl.PrimitiveTypeTriangle, dstRegion.IndexCount, mtl.IndexTypeUInt32, g.ib, indexOffset*int(unsafe.Sizeof(uint32(0))))
-		case graphicsdriver.FillRuleEvenOdd:
-			g.rce.SetDepthStencilState(g.dsss[invertStencil])
-			g.rce.SetRenderPipelineState(invertStencilRpss)
-			g.rce.DrawIndexedPrimitives(mtl.PrimitiveTypeTriangle, dstRegion.IndexCount, mtl.IndexTypeUInt32, g.ib, indexOffset*int(unsafe.Sizeof(uint32(0))))
-		}
-		if fillRule != graphicsdriver.FillRuleFillAll {
-			g.rce.SetDepthStencilState(g.dsss[drawWithStencil])
-			g.rce.SetRenderPipelineState(drawWithStencilRpss)
-			g.rce.DrawIndexedPrimitives(mtl.PrimitiveTypeTriangle, dstRegion.IndexCount, mtl.IndexTypeUInt32, g.ib, indexOffset*int(unsafe.Sizeof(uint32(0))))
-		}
+		g.rce.SetRenderPipelineState(rps)
+		g.rce.DrawIndexedPrimitives(mtl.PrimitiveTypeTriangle, dstRegion.IndexCount, mtl.IndexTypeUInt32, g.ib, indexOffset*int(unsafe.Sizeof(uint32(0))))
 
 		indexOffset += dstRegion.IndexCount
 	}
@@ -646,7 +553,7 @@ func (g *Graphics) draw(dst *Image, dstRegions []graphicsdriver.DstRegion, srcs 
 	return nil
 }
 
-func (g *Graphics) DrawTriangles(dstID graphicsdriver.ImageID, srcIDs [graphics.ShaderSrcImageCount]graphicsdriver.ImageID, shaderID graphicsdriver.ShaderID, dstRegions []graphicsdriver.DstRegion, indexOffset int, blend graphicsdriver.Blend, uniforms []uint32, fillRule graphicsdriver.FillRule) error {
+func (g *Graphics) DrawTriangles(dstID graphicsdriver.ImageID, srcIDs [graphics.ShaderSrcImageCount]graphicsdriver.ImageID, shaderID graphicsdriver.ShaderID, dstRegions []graphicsdriver.DstRegion, indexOffset int, blend graphicsdriver.Blend, uniforms []uint32) error {
 	if shaderID == graphicsdriver.InvalidShaderID {
 		return fmt.Errorf("metal: shader ID is invalid")
 	}
@@ -662,7 +569,7 @@ func (g *Graphics) DrawTriangles(dstID graphicsdriver.ImageID, srcIDs [graphics.
 		srcs[i] = g.images[srcID]
 	}
 
-	if err := g.draw(dst, dstRegions, srcs, indexOffset, g.shaders[shaderID], uniforms, blend, fillRule); err != nil {
+	if err := g.draw(dst, dstRegions, srcs, indexOffset, g.shaders[shaderID], uniforms, blend); err != nil {
 		return err
 	}
 
@@ -727,7 +634,7 @@ func (g *Graphics) MaxImageSize() int {
 }
 
 func (g *Graphics) NewShader(program *shaderir.Program) (graphicsdriver.Shader, error) {
-	s, err := newShader(g.view.getMTLDevice(), g.genNextShaderID(), program)
+	s, err := newShader(g.genNextShaderID(), g, g.view.getMTLDevice(), program)
 	if err != nil {
 		return nil, err
 	}
@@ -808,10 +715,12 @@ func (i *Image) ReadPixels(args []graphicsdriver.PixelsArgs) error {
 		if got, want := len(arg.Pixels), 4*arg.Region.Dx()*arg.Region.Dy(); got != want {
 			return fmt.Errorf("metal: len(buf) must be %d but %d at ReadPixels", want, got)
 		}
-		i.texture.GetBytes(&arg.Pixels[0], uintptr(4*arg.Region.Dx()), mtl.Region{
+		if err := i.texture.GetBytes(arg.Pixels, 4*arg.Region.Dx(), mtl.Region{
 			Origin: mtl.Origin{X: arg.Region.Min.X, Y: arg.Region.Min.Y},
 			Size:   mtl.Size{Width: arg.Region.Dx(), Height: arg.Region.Dy(), Depth: 1},
-		}, 0)
+		}, 0); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -843,10 +752,12 @@ func (i *Image) WritePixels(args []graphicsdriver.PixelsArgs) error {
 	g.tmpTextures = append(g.tmpTextures, t)
 
 	for _, a := range args {
-		t.ReplaceRegion(mtl.Region{
+		if err := t.ReplaceRegion(mtl.Region{
 			Origin: mtl.Origin{X: a.Region.Min.X - region.Min.X, Y: a.Region.Min.Y - region.Min.Y, Z: 0},
 			Size:   mtl.Size{Width: a.Region.Dx(), Height: a.Region.Dy(), Depth: 1},
-		}, 0, unsafe.Pointer(&a.Pixels[0]), 4*a.Region.Dx())
+		}, 0, a.Pixels, 4*a.Region.Dx()); err != nil {
+			return err
+		}
 	}
 
 	g.ensureCommandBuffer()

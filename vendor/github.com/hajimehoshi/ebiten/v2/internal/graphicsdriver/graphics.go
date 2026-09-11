@@ -15,9 +15,9 @@
 package graphicsdriver
 
 import (
-	"fmt"
 	"image"
 
+	"github.com/hajimehoshi/ebiten/v2/internal/color"
 	"github.com/hajimehoshi/ebiten/v2/internal/graphics"
 	"github.com/hajimehoshi/ebiten/v2/internal/shaderir"
 )
@@ -27,27 +27,6 @@ type DstRegion struct {
 	IndexCount int
 }
 
-type FillRule int
-
-const (
-	FillRuleFillAll FillRule = iota
-	FillRuleNonZero
-	FillRuleEvenOdd
-)
-
-func (f FillRule) String() string {
-	switch f {
-	case FillRuleFillAll:
-		return "FillRuleFillAll"
-	case FillRuleNonZero:
-		return "FillRuleNonZero"
-	case FillRuleEvenOdd:
-		return "FillRuleEvenOdd"
-	default:
-		return fmt.Sprintf("FillRule(%d)", f)
-	}
-}
-
 const (
 	InvalidImageID  = 0
 	InvalidShaderID = 0
@@ -55,6 +34,7 @@ const (
 
 type Graphics interface {
 	Initialize() error
+	ColorSpace() color.ColorSpace
 	Begin() error
 	End(present bool) error
 	SetTransparent(transparent bool)
@@ -68,7 +48,7 @@ type Graphics interface {
 	NewShader(program *shaderir.Program) (Shader, error)
 
 	// DrawTriangles draws an image onto another image with the given parameters.
-	DrawTriangles(dst ImageID, srcs [graphics.ShaderSrcImageCount]ImageID, shader ShaderID, dstRegions []DstRegion, indexOffset int, blend Blend, uniforms []uint32, fillRule FillRule) error
+	DrawTriangles(dst ImageID, srcs [graphics.ShaderSrcImageCount]ImageID, shader ShaderID, dstRegions []DstRegion, indexOffset int, blend Blend, uniforms []uint32) error
 }
 
 type Resetter interface {
@@ -95,11 +75,3 @@ type Shader interface {
 }
 
 type ShaderID int
-
-type ColorSpace int
-
-const (
-	ColorSpaceDefault ColorSpace = iota
-	ColorSpaceSRGB
-	ColorSpaceDisplayP3
-)

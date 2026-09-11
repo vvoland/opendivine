@@ -33,10 +33,16 @@ type Shader struct {
 }
 
 func NewShader(ir *shaderir.Program, name string) *Shader {
+	uniformTypes := ir.Uniforms[graphics.PreservedUniformVariablesCount:]
+	var uniformDwordCount int
+	for _, typ := range uniformTypes {
+		uniformDwordCount += typ.DwordCount()
+	}
 	return &Shader{
-		shader:       atlas.NewShader(ir, name),
-		uniformNames: ir.UniformNames[graphics.PreservedUniformVariablesCount:],
-		uniformTypes: ir.Uniforms[graphics.PreservedUniformVariablesCount:],
+		shader:            atlas.NewShader(ir, name),
+		uniformNames:      ir.UniformNames[graphics.PreservedUniformVariablesCount:],
+		uniformTypes:      uniformTypes,
+		uniformDwordCount: uniformDwordCount,
 	}
 }
 
@@ -45,12 +51,6 @@ func (s *Shader) Deallocate() {
 }
 
 func (s *Shader) AppendUniforms(dst []uint32, uniforms map[string]any) []uint32 {
-	if s.uniformDwordCount == 0 {
-		for _, typ := range s.uniformTypes {
-			s.uniformDwordCount += typ.DwordCount()
-		}
-	}
-
 	origLen := len(dst)
 	if cap(dst)-len(dst) >= s.uniformDwordCount {
 		dst = dst[:len(dst)+s.uniformDwordCount]
@@ -101,7 +101,7 @@ func (s *Shader) AppendUniforms(dst []uint32, uniforms map[string]any) []uint32 
 				}
 				switch t.Elem().Kind() {
 				case reflect.Bool:
-					for i := 0; i < l; i++ {
+					for i := range l {
 						if v.Index(i).Bool() {
 							dst[idx+i] = 1
 						} else {
@@ -109,15 +109,15 @@ func (s *Shader) AppendUniforms(dst []uint32, uniforms map[string]any) []uint32 
 						}
 					}
 				case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-					for i := 0; i < l; i++ {
+					for i := range l {
 						dst[idx+i] = uint32(v.Index(i).Int())
 					}
 				case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
-					for i := 0; i < l; i++ {
+					for i := range l {
 						dst[idx+i] = uint32(v.Index(i).Uint())
 					}
 				case reflect.Float32, reflect.Float64:
-					for i := 0; i < l; i++ {
+					for i := range l {
 						dst[idx+i] = math.Float32bits(float32(v.Index(i).Float()))
 					}
 				default:

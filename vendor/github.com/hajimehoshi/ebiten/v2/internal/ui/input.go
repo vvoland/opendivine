@@ -23,8 +23,8 @@ type MouseButton int
 
 const (
 	MouseButton0   MouseButton = iota // The 'left' button
-	MouseButton1                      // The 'right' button
-	MouseButton2                      // The 'middle' button
+	MouseButton1                      // The 'middle' button
+	MouseButton2                      // The 'right' button
 	MouseButton3                      // The additional button (usually browser-back)
 	MouseButton4                      // The additional button (usually browser-forward)
 	MouseButtonMax = MouseButton4
@@ -34,8 +34,25 @@ type TouchID int
 
 type Touch struct {
 	ID TouchID
-	X  int
-	Y  int
+	X  float64
+	Y  float64
+}
+
+// LockKeyState is the state of a lock key. The zero value means the platform does not report the state.
+type LockKeyState byte
+
+const (
+	LockKeyStateUnknown LockKeyState = iota
+	LockKeyStateOn
+	LockKeyStateOff
+)
+
+// NewLockKeyStateFromBool converts an on/off state reported by a platform to a LockKeyState.
+func NewLockKeyStateFromBool(on bool) LockKeyState {
+	if on {
+		return LockKeyStateOn
+	}
+	return LockKeyStateOff
 }
 
 type InputState struct {
@@ -53,6 +70,26 @@ type InputState struct {
 	Runes             []rune
 	WindowBeingClosed bool
 	DroppedFiles      fs.FS
+	CapsLock          LockKeyState
+	NumLock           LockKeyState
+}
+
+// IsCapsLockOn reports whether Caps Lock is on.
+func (i *InputState) IsCapsLockOn() bool {
+	if i.CapsLock == LockKeyStateUnknown {
+		// An unreported state is off.
+		return false
+	}
+	return i.CapsLock == LockKeyStateOn
+}
+
+// IsNumLockOn reports whether the numeric keypad produces digits.
+func (i *InputState) IsNumLockOn() bool {
+	if i.NumLock == LockKeyStateUnknown {
+		// An unreported state is on: a keypad that reports nothing produces digits.
+		return true
+	}
+	return i.NumLock == LockKeyStateOn
 }
 
 func (i *InputState) setKeyPressed(key Key, t InputTime) {
@@ -124,9 +161,15 @@ func (i *InputState) IsKeyPressed(key Key, tick int64) bool {
 	}
 	p := i.KeyPressedTimes[key]
 	r := i.KeyReleasedTimes[key]
+	if isModifierKey(key) {
+		return inputStateModifierPressed(p, r, tick)
+	}
 	return inputStatePressed(p, r, tick)
 }
 
+// A key representing multiple keys like KeyShift is not resolved into its left and right variants
+// for the just-pressed, just-released, and duration states: when the variants are pressed or released
+// at different ticks, there is no unambiguous tick to report for the combined key.
 func (i *InputState) IsKeyJustPressed(key Key, tick int64) bool {
 	if key < 0 || KeyMax < key {
 		return false
@@ -149,6 +192,9 @@ func (i *InputState) KeyPressDuration(key Key, tick int64) int64 {
 	}
 	p := i.KeyPressedTimes[key]
 	r := i.KeyReleasedTimes[key]
+	if isModifierKey(key) {
+		return inputStateModifierDuration(p, r, tick)
+	}
 	return inputStateDuration(p, r, tick)
 }
 
@@ -186,6 +232,17 @@ func (i *InputState) MouseButtonPressDuration(button MouseButton, tick int64) in
 	return inputStateDuration(p, r, tick)
 }
 
+func isModifierKey(key Key) bool {
+	switch key {
+	case KeyAlt, KeyAltLeft, KeyAltRight,
+		KeyControl, KeyControlLeft, KeyControlRight,
+		KeyMeta, KeyMetaLeft, KeyMetaRight,
+		KeyShift, KeyShiftLeft, KeyShiftRight:
+		return true
+	}
+	return false
+}
+
 func inputStatePressed(pressed, released InputTime, tick int64) bool {
 	return released < pressed || inputStateJustPressed(pressed, tick)
 }
@@ -198,11 +255,31 @@ func inputStateJustReleased(released InputTime, tick int64) bool {
 	return released > 0 && released.Tick() == tick
 }
 
+// inputStateModifierPressed reports whether a modifier key was down at any point during the tick.
+//
+// An input event is stamped with the tick it is processed in, so a stalled event queue can deliver a
+// modifier's release edge in the same tick as the press edge of the key it qualifies. As a modifier is
+// read as a state beside an edge query on that key, ending the press at the release edge would lose the
+// chord (#3497, #3498).
+func inputStateModifierPressed(pressed, released InputTime, tick int64) bool {
+	return inputStatePressed(pressed, released, tick) || inputStateJustReleased(released, tick)
+}
+
 func inputStateDuration(pressed, released InputTime, tick int64) int64 {
 	if pressed == 0 {
 		return 0
 	}
 	if pressed < released {
+		return 0
+	}
+	return tick - pressed.Tick() + 1
+}
+
+func inputStateModifierDuration(pressed, released InputTime, tick int64) int64 {
+	if pressed == 0 {
+		return 0
+	}
+	if !inputStateModifierPressed(pressed, released, tick) {
 		return 0
 	}
 	return tick - pressed.Tick() + 1
@@ -221,6 +298,8 @@ func (i *InputState) copyAndReset(dst *InputState) {
 	dst.Runes = append(dst.Runes[:0], i.Runes...)
 	dst.WindowBeingClosed = i.WindowBeingClosed
 	dst.DroppedFiles = i.DroppedFiles
+	dst.CapsLock = i.CapsLock
+	dst.NumLock = i.NumLock
 
 	// Reset the members that are updated by deltas, rather than absolute values.
 	i.WheelX = 0

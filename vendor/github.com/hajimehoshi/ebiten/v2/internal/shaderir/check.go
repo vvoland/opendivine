@@ -104,7 +104,7 @@ func TypeFromBinaryOp(op Op, lhst, rhst Type, lhsConst, rhsConst constant.Value)
 			return Type{}, false
 		}
 
-		if op == And || op == Or || op == Xor {
+		if op == And || op == AndNot || op == Or || op == Xor {
 			if lhsConst.Kind() == constant.Int && rhsConst.Kind() == constant.Int {
 				return Type{Main: Int}, true
 			}
@@ -149,7 +149,7 @@ func TypeFromBinaryOp(op Op, lhst, rhst Type, lhsConst, rhsConst constant.Value)
 	}
 
 	if op == VectorEqualOp || op == VectorNotEqualOp {
-		if (lhst.IsFloatVector() || lhst.IsIntVector()) && (rhst.IsFloatVector() || lhst.IsIntVector()) && lhst.Equal(&rhst) {
+		if (lhst.IsFloatVector() || lhst.IsIntVector()) && (rhst.IsFloatVector() || rhst.IsIntVector()) && lhst.Equal(&rhst) {
 			return Type{Main: Bool}, true
 		}
 		return Type{}, false
@@ -163,8 +163,13 @@ func TypeFromBinaryOp(op Op, lhst, rhst Type, lhsConst, rhsConst constant.Value)
 	}
 
 	// Comparing matrices are forbidden (#2187).
+	// Comparing arrays is forbidden as well, as most of the shading languages don't have the
+	// operation (#3535).
 	if op == EqualOp || op == NotEqualOp {
 		if lhst.IsMatrix() || rhst.IsMatrix() {
+			return Type{}, false
+		}
+		if lhst.Main == Array || rhst.Main == Array {
 			return Type{}, false
 		}
 		if lhst.Equal(&rhst) {
@@ -193,7 +198,7 @@ func TypeFromBinaryOp(op Op, lhst, rhst Type, lhsConst, rhsConst constant.Value)
 		return Type{}, false
 	}
 
-	if op == And || op == Or || op == Xor {
+	if op == And || op == AndNot || op == Or || op == Xor {
 		if lhst.Main == Int && rhst.Main == Int {
 			return Type{Main: Int}, true
 		}

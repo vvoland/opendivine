@@ -20,6 +20,8 @@
 
 extern "C" ebitengine_Error ebitengine_InitializeGraphics(void) { return {}; }
 
+extern "C" int ebitengine_MaxImageSize(void) { return 0; }
+
 extern "C" ebitengine_Error ebitengine_NewImage(int *image, int width,
                                                 int height) {
   return {};
@@ -57,7 +59,7 @@ ebitengine_DrawTriangles(int dst, const int *srcs, int src_count, int shader,
                          const ebitengine_DstRegion *dst_regions,
                          int dst_region_count, int index_offset,
                          ebitengine_Blend blend, const uint32_t *uniforms,
-                         int uniform_count, int fill_rule) {
+                         int uniform_count) {
   return {};
 }
 

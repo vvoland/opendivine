@@ -22,10 +22,11 @@ import (
 )
 
 type Page struct {
-	root    *Node
-	width   int
-	height  int
-	maxSize int
+	root     *Node
+	width    int
+	height   int
+	maxSize  int
+	overhang int
 }
 
 func isPositivePowerOf2(x int) bool {
@@ -35,7 +36,10 @@ func isPositivePowerOf2(x int) bool {
 	return x&(x-1) == 0
 }
 
-func NewPage(initWidth, initHeight int, maxSize int) *Page {
+// NewPage returns a new Page.
+//
+// A node can stick out of the page by overhang pixels at the right and the bottom edges.
+func NewPage(initWidth, initHeight int, maxSize int, overhang int) *Page {
 	if !isPositivePowerOf2(initWidth) {
 		panic(fmt.Sprintf("packing: initWidth must be a positive power of 2 but %d", initWidth))
 	}
@@ -45,11 +49,20 @@ func NewPage(initWidth, initHeight int, maxSize int) *Page {
 	if !isPositivePowerOf2(maxSize) {
 		panic(fmt.Sprintf("packing: maxSize must be a positive power of 2 but %d", maxSize))
 	}
-	return &Page{
-		width:   initWidth,
-		height:  initHeight,
-		maxSize: maxSize,
+	if overhang < 0 {
+		panic(fmt.Sprintf("packing: overhang must not be negative but %d", overhang))
 	}
+	return &Page{
+		width:    initWidth,
+		height:   initHeight,
+		maxSize:  maxSize,
+		overhang: overhang,
+	}
+}
+
+// allocatableSize returns the size of the region where nodes can be allocated.
+func (p *Page) allocatableSize() (int, int) {
+	return p.width + p.overhang, p.height + p.overhang
 }
 
 func (p *Page) IsEmpty() bool {
@@ -162,8 +175,9 @@ func (p *Page) Alloc(width, height int) *Node {
 	}
 
 	if p.root == nil {
+		w, h := p.allocatableSize()
 		p.root = &Node{
-			region: image.Rect(0, 0, p.width, p.height),
+			region: image.Rect(0, 0, w, h),
 		}
 	}
 	return p.extendAndAlloc(width, height)
@@ -187,8 +201,16 @@ func (p *Page) Free(node *Node) {
 	}
 }
 
+var (
+	skipAll      = errors.New("skip all")
+	skipChildren = errors.New("skip children")
+)
+
 func walk(n *Node, f func(n *Node) error) error {
 	if err := f(n); err != nil {
+		if errors.Is(err, skipChildren) {
+			return nil
+		}
 		return err
 	}
 	if n.child0 != nil {
@@ -247,17 +269,19 @@ func (p *Page) extendAndAlloc(width, height int) *Node {
 }
 
 func (p *Page) extend(newWidth int, newHeight int) func() {
-	edgeNodes := []*Node{}
-	abort := errors.New("abort")
-	aborted := false
+	allocatableWidth, allocatableHeight := p.allocatableSize()
+	newAllocatableWidth, newAllocatableHeight := newWidth+p.overhang, newHeight+p.overhang
+
+	var edgeNodes []*Node
+	var edgeAllocated bool
 	if p.root != nil {
 		_ = walk(p.root, func(n *Node) error {
-			if n.region.Max.X < p.width && n.region.Max.Y < p.height {
+			if n.region.Max.X < allocatableWidth && n.region.Max.Y < allocatableHeight {
 				return nil
 			}
 			if n.used {
-				aborted = true
-				return abort
+				edgeAllocated = true
+				return skipAll
 			}
 			edgeNodes = append(edgeNodes, n)
 			return nil
@@ -266,7 +290,10 @@ func (p *Page) extend(newWidth int, newHeight int) func() {
 
 	var rollback func()
 
-	if aborted {
+	if edgeAllocated {
+		// As there is at least one allocated on the edge.
+		// Extend the page by simply adding a region.
+
 		origRoot := p.root
 		origRootCloned := *p.root
 
@@ -274,10 +301,10 @@ func (p *Page) extend(newWidth int, newHeight int) func() {
 		if newHeight-p.height > 0 {
 			upper := p.root
 			lower := &Node{
-				region: image.Rect(0, p.height, p.width, newHeight),
+				region: image.Rect(0, allocatableHeight, allocatableWidth, newAllocatableHeight),
 			}
 			p.root = &Node{
-				region: image.Rect(0, 0, p.width, newHeight),
+				region: image.Rect(0, 0, allocatableWidth, newAllocatableHeight),
 				child0: upper,
 				child1: lower,
 			}
@@ -289,10 +316,10 @@ func (p *Page) extend(newWidth int, newHeight int) func() {
 		if newWidth-p.width > 0 {
 			left := p.root
 			right := &Node{
-				region: image.Rect(p.width, 0, newWidth, newHeight),
+				region: image.Rect(allocatableWidth, 0, newAllocatableWidth, newAllocatableHeight),
 			}
 			p.root = &Node{
-				region: image.Rect(0, 0, newWidth, newHeight),
+				region: image.Rect(0, 0, newAllocatableWidth, newAllocatableHeight),
 				child0: left,
 				child1: right,
 			}
@@ -310,18 +337,20 @@ func (p *Page) extend(newWidth int, newHeight int) func() {
 			*p.root = origRootCloned
 		}
 	} else {
+		// Extend the page by extending edge nodes.
+
 		origWidth, origHeight := p.width, p.height
 		origMaxXs := map[*Node]int{}
 		origMaxYs := map[*Node]int{}
 
 		for _, n := range edgeNodes {
-			if n.region.Max.X == p.width {
+			if n.region.Max.X == allocatableWidth {
 				origMaxXs[n] = n.region.Max.X
-				n.region.Max.X = newWidth
+				n.region.Max.X = newAllocatableWidth
 			}
-			if n.region.Max.Y == p.height {
+			if n.region.Max.Y == allocatableHeight {
 				origMaxYs[n] = n.region.Max.Y
-				n.region.Max.Y = newHeight
+				n.region.Max.Y = newAllocatableHeight
 			}
 		}
 
@@ -341,4 +370,23 @@ func (p *Page) extend(newWidth int, newHeight int) func() {
 	p.height = newHeight
 
 	return rollback
+}
+
+func (p *Page) AllocatedRegion() image.Rectangle {
+	var r image.Rectangle
+	if p.root == nil {
+		return r
+	}
+	_ = walk(p.root, func(n *Node) error {
+		if n.region.In(r) {
+			return skipChildren
+		}
+		if n.used {
+			r = r.Union(n.region)
+			return skipChildren
+		}
+		return nil
+	})
+	// A node at the right or the bottom edge can stick out of the page.
+	return r.Intersect(image.Rect(0, 0, p.width, p.height))
 }

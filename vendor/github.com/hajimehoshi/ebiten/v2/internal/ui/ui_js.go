@@ -21,6 +21,7 @@ import (
 	"syscall/js"
 	"time"
 
+	"github.com/hajimehoshi/ebiten/v2/internal/color"
 	"github.com/hajimehoshi/ebiten/v2/internal/file"
 	"github.com/hajimehoshi/ebiten/v2/internal/gamepad"
 	"github.com/hajimehoshi/ebiten/v2/internal/graphicsdriver"
@@ -30,7 +31,7 @@ import (
 
 type graphicsDriverCreatorImpl struct {
 	canvas     js.Value
-	colorSpace graphicsdriver.ColorSpace
+	colorSpace color.ColorSpace
 }
 
 func (g *graphicsDriverCreatorImpl) newAuto() (graphicsdriver.Graphics, GraphicsLibrary, error) {
@@ -115,8 +116,10 @@ type userInterfaceImpl struct {
 
 	keyboardLayoutMap js.Value
 
-	m         sync.Mutex
-	dropFileM sync.Mutex
+	textInputFocusedFunc func() bool
+
+	mu         sync.Mutex
+	dropFileMu sync.Mutex
 }
 
 var (
@@ -307,7 +310,7 @@ func (u *UserInterface) isFocused() bool {
 // > This prevents locking upon initial navigation or re-acquiring lock without user's attention.
 func (u *UserInterface) canCaptureCursor() bool {
 	// 1.5 [sec] seems enough in the real world.
-	return time.Now().Sub(u.lastCaptureExitTime) >= 1500*time.Millisecond
+	return time.Since(u.lastCaptureExitTime) >= 1500*time.Millisecond
 }
 
 func (u *UserInterface) update() error {
@@ -326,15 +329,15 @@ func (u *UserInterface) update() error {
 
 func (u *UserInterface) updateImpl(force bool) error {
 	// Guard updateImpl as this function cannot be invoked until this finishes (#2339).
-	u.m.Lock()
-	defer u.m.Unlock()
+	u.mu.Lock()
+	defer u.mu.Unlock()
 
 	// context can be nil when an event is fired but the loop doesn't start yet (#1928).
 	if u.context == nil {
 		return nil
 	}
 
-	if err := gamepad.Update(); err != nil {
+	if err := gamepad.Update(0, nil); err != nil {
 		return err
 	}
 
@@ -343,12 +346,13 @@ func (u *UserInterface) updateImpl(force bool) error {
 	// See also https://crbug.com/123694.
 
 	w, h := u.outsideSize()
+	sw, sh := u.screenSize()
 	if force {
-		if err := u.context.forceUpdateFrame(u.graphicsDriver, w, h, theMonitor.DeviceScaleFactor(), u); err != nil {
+		if err := u.context.forceUpdateFrame(u.graphicsDriver, w, h, sw, sh, theMonitor.DeviceScaleFactor(), u); err != nil {
 			return err
 		}
 	} else {
-		if err := u.context.updateFrame(u.graphicsDriver, w, h, theMonitor.DeviceScaleFactor(), u); err != nil {
+		if err := u.context.updateFrame(u.graphicsDriver, w, h, sw, sh, theMonitor.DeviceScaleFactor(), u, true); err != nil {
 			return err
 		}
 	}
@@ -558,24 +562,57 @@ func (u *UserInterface) init() error {
 
 func (u *UserInterface) setWindowEventHandlers(v js.Value) {
 	v.Call("addEventListener", "resize", js.FuncOf(func(this js.Value, args []js.Value) any {
-		u.updateScreenSize()
-
-		// updateImpl can block. Use goroutine.
-		// See https://pkg.go.dev/syscall/js#FuncOf.
-		go func() {
-			if err := u.updateImpl(true); err != nil {
-				u.setError(err)
-				return
-			}
-		}()
+		u.onResize()
 		return nil
 	}))
 }
 
+func (u *UserInterface) onResize() {
+	u.updateScreenSize()
+
+	// updateImpl can block. Use goroutine.
+	// See https://pkg.go.dev/syscall/js#FuncOf.
+	go func() {
+		if err := u.updateImpl(true); err != nil {
+			u.setError(err)
+			return
+		}
+	}()
+}
+
+// SetTextInputFocusedFunc registers a function reporting whether an element
+// receiving text input has the DOM focus.
+func (u *UserInterface) SetTextInputFocusedFunc(f func() bool) {
+	u.textInputFocusedFunc = f
+}
+
+// FocusCanvas moves the DOM focus to the canvas.
+func (u *UserInterface) FocusCanvas() {
+	if !canvas.Truthy() {
+		return
+	}
+	canvas.Call("focus")
+}
+
+func (u *UserInterface) isTextInputFocused() bool {
+	if u.textInputFocusedFunc == nil {
+		return false
+	}
+	return u.textInputFocusedFunc()
+}
+
 func (u *UserInterface) setCanvasEventHandlers(v js.Value) {
+	if resizeObserver := js.Global().Get("ResizeObserver"); resizeObserver.Truthy() {
+		observer := resizeObserver.New(js.FuncOf(func(this js.Value, args []js.Value) any {
+			u.onResize()
+			return nil
+		}))
+		observer.Call("observe", v)
+	}
+
 	// Keyboard
 	v.Call("addEventListener", "keydown", js.FuncOf(func(this js.Value, args []js.Value) any {
-		// Focus the canvas explicitly to activate tha game (#961).
+		// Focus the canvas explicitly to activate the game (#961).
 		v.Call("focus")
 
 		e := args[0]
@@ -598,8 +635,11 @@ func (u *UserInterface) setCanvasEventHandlers(v js.Value) {
 
 	// Mouse
 	v.Call("addEventListener", "mousedown", js.FuncOf(func(this js.Value, args []js.Value) any {
-		// Focus the canvas explicitly to activate tha game (#961).
-		v.Call("focus")
+		// Focus the canvas explicitly to activate the game (#961).
+		// Taking the focus from the text input element would dismiss a virtual keyboard.
+		if !u.isTextInputFocused() {
+			v.Call("focus")
+		}
 
 		e := args[0]
 		e.Call("preventDefault")
@@ -639,8 +679,11 @@ func (u *UserInterface) setCanvasEventHandlers(v js.Value) {
 
 	// Touch
 	v.Call("addEventListener", "touchstart", js.FuncOf(func(this js.Value, args []js.Value) any {
-		// Focus the canvas explicitly to activate tha game (#961).
-		v.Call("focus")
+		// Focus the canvas explicitly to activate the game (#961).
+		// Taking the focus from the text input element would dismiss a virtual keyboard.
+		if !u.isTextInputFocused() {
+			v.Call("focus")
+		}
 
 		e := args[0]
 		e.Call("preventDefault")
@@ -710,12 +753,12 @@ func (u *UserInterface) setCanvasEventHandlers(v js.Value) {
 }
 
 func (u *UserInterface) appendDroppedFiles(data js.Value) {
-	u.dropFileM.Lock()
-	defer u.dropFileM.Unlock()
+	u.dropFileMu.Lock()
+	defer u.dropFileMu.Unlock()
 	items := data.Get("items")
 
 	var entries []js.Value
-	for i := 0; i < items.Length(); i++ {
+	for i := range items.Length() {
 		kind := items.Index(i).Get("kind").String()
 		switch kind {
 		case "file":
@@ -793,6 +836,21 @@ func (u *UserInterface) initOnMainThread(options *RunOptions) error {
 	return nil
 }
 
+// screenSize returns the size of the drawing buffer the screen is rendered into, in pixels.
+func (u *UserInterface) screenSize() (int, int) {
+	// TODO: The drawing buffer's size is the size updateScreenSize asks for, so it is scaled by
+	// the device pixel ratio there rather than reported in device pixels by the browser. Use a
+	// ResizeObserver's devicePixelContentBoxSize, which is measured in device pixels, once it is
+	// available across browsers.
+	if g, ok := u.graphicsDriver.(interface{ ScreenFramebufferSize() (int, int) }); ok {
+		return g.ScreenFramebufferSize()
+	}
+	// Node.js has no canvas, and so no drawing buffer to report.
+	w, h := u.outsideSize()
+	f := theMonitor.DeviceScaleFactor()
+	return int(w * f), int(h * f)
+}
+
 func (u *UserInterface) updateScreenSize() {
 	if document.Truthy() {
 		body := document.Get("body")
@@ -862,4 +920,8 @@ func IsScreenTransparentAvailable() bool {
 
 func dipToNativePixels(x float64, scale float64) float64 {
 	return x
+}
+
+func (u *UserInterface) RunOnMainThread(f func()) {
+	f()
 }

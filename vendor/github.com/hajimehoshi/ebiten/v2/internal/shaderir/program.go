@@ -17,34 +17,42 @@ package shaderir
 
 import (
 	"bytes"
-	"encoding/hex"
+	"encoding/base32"
+	"fmt"
 	"go/constant"
 	"go/token"
 	"hash/fnv"
-	"sort"
+	"slices"
 	"strings"
 )
 
-type Unit int
+type SourceID [16]byte
 
-const (
-	Texels Unit = iota
-	Pixels
-)
-
-type SourceHash [16]byte
-
-func CalcSourceHash(source []byte) SourceHash {
+func CalcSourceID(source []byte) SourceID {
 	h := fnv.New128a()
 	_, _ = h.Write(bytes.TrimSpace(source))
 
-	var hash SourceHash
+	var hash SourceID
 	h.Sum(hash[:0])
 	return hash
 }
 
-func (s SourceHash) String() string {
-	return hex.EncodeToString(s[:])
+func (s SourceID) String() string {
+	return strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(s[:]))
+}
+
+// ParseSourceID parses a base32 string returned by [SourceID.String] back into a SourceID.
+func ParseSourceID(str string) (SourceID, error) {
+	bs, err := base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(strings.ToUpper(str))
+	if err != nil {
+		return SourceID{}, err
+	}
+	var id SourceID
+	if len(bs) != len(id) {
+		return SourceID{}, fmt.Errorf("shaderir: invalid SourceID string: %q", str)
+	}
+	copy(id[:], bs)
+	return id, nil
 }
 
 type Program struct {
@@ -56,9 +64,12 @@ type Program struct {
 	Funcs        []Func
 	VertexFunc   VertexFunc
 	FragmentFunc FragmentFunc
-	Unit         Unit
 
-	SourceHash SourceHash
+	SourceID SourceID
+
+	// FragmentSource is the Kage source the program was compiled from, or nil if it was not built from
+	// Kage source.
+	FragmentSource []byte
 
 	uniformFactors []uint32
 }
@@ -71,7 +82,7 @@ type Func struct {
 	Block     *Block
 }
 
-// VertexFunc takes pseudo params, and the number if len(attributes) + len(varyings) + 1.
+// VertexFunc takes pseudo params, and the number is len(attributes) + len(varyings) + 1.
 // If 0 <= index < len(attributes), the params are in-params and represent attribute variables.
 // If index == len(attributes), the param is an out-param and represents the position in vec4 (gl_Position in GLSL)
 // If len(attributes) + 1 <= index < len(attributes) + len(varyings) + 1, the params are out-params and represent
@@ -80,7 +91,7 @@ type VertexFunc struct {
 	Block *Block
 }
 
-// FragmentFunc takes pseudo params, and the number is len(varyings) + 2.
+// FragmentFunc takes pseudo params, and the number is len(varyings) + 1.
 // If index == 0, the param represents the coordinate of the fragment (gl_FragCoord in GLSL).
 // If 0 < index <= len(varyings), the param represents (index-1)th varying variable.
 type FragmentFunc struct {
@@ -157,6 +168,7 @@ const (
 	Add Op = iota
 	Sub
 	NotOp
+	ComplementOp
 	ComponentWiseMul
 	MatrixMul
 	Div
@@ -172,6 +184,7 @@ const (
 	VectorEqualOp
 	VectorNotEqualOp
 	And
+	AndNot
 	Xor
 	Or
 	AndAnd
@@ -223,6 +236,8 @@ func OpFromToken(t token.Token, lhs, rhs Type) (Op, bool) {
 		return NotEqualOp, true
 	case token.AND:
 		return And, true
+	case token.AND_NOT:
+		return AndNot, true
 	case token.XOR:
 		return Xor, true
 	case token.OR:
@@ -399,7 +414,6 @@ func IsValidSwizzling(s string) bool {
 func (p *Program) ReachableFuncsFromBlock(block *Block) []*Func {
 	indexToFunc := map[int]*Func{}
 	for _, f := range p.Funcs {
-		f := f
 		indexToFunc[f.Index] = &f
 	}
 
@@ -419,7 +433,7 @@ func (p *Program) ReachableFuncsFromBlock(block *Block) []*Func {
 	}
 	walkExprs(f, block)
 
-	sort.Ints(indices)
+	slices.Sort(indices)
 
 	funcs := make([]*Func, 0, len(indices))
 	for _, i := range indices {
@@ -455,7 +469,6 @@ func walkExprsInExpr(f func(expr *Expr), expr *Expr) {
 func (p *Program) appendReachableUniformVariablesFromBlock(indices []int, block *Block) []int {
 	indexToFunc := map[int]*Func{}
 	for _, f := range p.Funcs {
-		f := f
 		indexToFunc[f.Index] = &f
 	}
 

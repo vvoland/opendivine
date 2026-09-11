@@ -19,7 +19,6 @@ package opengl
 import (
 	"fmt"
 	"math"
-	"runtime"
 	"unsafe"
 
 	"github.com/hajimehoshi/ebiten/v2/internal/graphics"
@@ -58,7 +57,7 @@ func (a *arrayBufferLayout) float32Count() int {
 	if a.total != 0 {
 		return a.total
 	}
-	t := 0
+	var t int
 	for _, p := range a.parts {
 		t += p.num
 	}
@@ -77,7 +76,7 @@ func (a *arrayBufferLayout) enable(context *context) {
 		context.ctx.EnableVertexAttribArray(uint32(i))
 	}
 	total := a.float32Count()
-	offset := 0
+	var offset int
 	for i, p := range a.parts {
 		context.ctx.VertexAttribPointer(uint32(i), int32(p.num), gl.FLOAT, false, int32(floatSizeInBytes*total), offset)
 		offset += floatSizeInBytes * p.num
@@ -121,7 +120,7 @@ func init() {
 	if diff%4 != 0 {
 		panic("opengl: unexpected attribute layout")
 	}
-	for i := 0; i < diff/4; i++ {
+	for i := range diff / 4 {
 		theArrayBufferLayout.addPart(arrayBufferLayoutPart{
 			name: fmt.Sprintf("A%d", i+3),
 			num:  4,
@@ -155,22 +154,16 @@ func (s *openGLState) reset(context *context) error {
 
 	s.lastProgram = 0
 	context.ctx.UseProgram(0)
-	for key := range s.lastUniforms {
-		delete(s.lastUniforms, key)
-	}
+	clear(s.lastUniforms)
 
-	// On browsers (at least Chrome), buffers are already detached from the context
-	// and must not be deleted by DeleteBuffer.
-	if runtime.GOOS != "js" {
-		if s.arrayBuffer != 0 {
-			context.ctx.DeleteBuffer(uint32(s.arrayBuffer))
-		}
-		if s.elementArrayBuffer != 0 {
-			context.ctx.DeleteBuffer(uint32(s.elementArrayBuffer))
-		}
-		if s.vertexArray != 0 {
-			context.ctx.DeleteVertexArray(s.vertexArray)
-		}
+	if s.arrayBuffer != 0 {
+		context.ctx.DeleteBuffer(uint32(s.arrayBuffer))
+	}
+	if s.elementArrayBuffer != 0 {
+		context.ctx.DeleteBuffer(uint32(s.elementArrayBuffer))
+	}
+	if s.vertexArray != 0 {
+		context.ctx.DeleteVertexArray(s.vertexArray)
 	}
 
 	s.arrayBuffer = 0
@@ -233,9 +226,7 @@ func (s *openGLState) setVertices(context *context, vertices []float32, indices 
 }
 
 func (s *openGLState) resetLastUniforms() {
-	for k := range s.lastUniforms {
-		delete(s.lastUniforms, k)
-	}
+	clear(s.lastUniforms)
 }
 
 // areSameUint32Array returns a boolean indicating if a and b are deeply equal.
@@ -243,7 +234,7 @@ func areSameUint32Array(a, b []uint32) bool {
 	if len(a) != len(b) {
 		return false
 	}
-	for i := 0; i < len(a); i++ {
+	for i := range a {
 		if a[i] != b[i] {
 			return false
 		}
@@ -274,15 +265,22 @@ func (g *Graphics) textureVariableName(idx int) string {
 	return name
 }
 
+func (g *Graphics) deleteProgram(p program) {
+	// A name of a deleted program can be reused for a new program.
+	// Reset lastProgram so that useProgram doesn't skip the state updates for such a new program.
+	if g.state.lastProgram == p {
+		g.state.lastProgram = 0
+	}
+	g.context.deleteProgram(p)
+}
+
 // useProgram uses the program (programTexture).
 func (g *Graphics) useProgram(program program, uniforms []uniformVariable, textures [graphics.ShaderSrcImageCount]textureVariable) error {
 	if g.state.lastProgram != program {
 		g.context.ctx.UseProgram(uint32(program))
 
 		g.state.lastProgram = program
-		for k := range g.state.lastUniforms {
-			delete(g.state.lastUniforms, k)
-		}
+		clear(g.state.lastUniforms)
 		g.state.lastActiveTexture = 0
 		g.context.ctx.ActiveTexture(gl.TEXTURE0)
 		g.context.lastTexture = 0 // Make sure next bindTexture call actually does something.

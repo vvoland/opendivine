@@ -83,7 +83,7 @@ func (u *UserInterface) initOnMainThread(options *RunOptions) error {
 
 func (u *UserInterface) loopGame() error {
 	for {
-		if err := u.context.updateFrame(u.graphicsDriver, screenWidth, screenHeight, theMonitor.DeviceScaleFactor(), u); err != nil {
+		if err := u.context.updateFrame(u.graphicsDriver, screenWidth, screenHeight, screenWidth, screenHeight, theMonitor.DeviceScaleFactor(), u, true); err != nil {
 			return err
 		}
 	}
@@ -179,4 +179,8 @@ func IsScreenTransparentAvailable() bool {
 
 func dipToNativePixels(x float64, scale float64) float64 {
 	return x
+}
+
+func (u *UserInterface) RunOnMainThread(f func()) {
+	panic("ui: RunOnMainThread is not implemented for this platform")
 }

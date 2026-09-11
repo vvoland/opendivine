@@ -15,6 +15,7 @@
 package oto
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -48,7 +49,7 @@ const (
 	// FormatUnsignedInt8 is the format of 8 bits integers.
 	FormatUnsignedInt8
 
-	//FormatSignedInt16LE is the format of 16 bits integers little endian.
+	// FormatSignedInt16LE is the format of 16 bits integers little endian.
 	FormatSignedInt16LE
 )
 
@@ -73,11 +74,16 @@ type NewContextOptions struct {
 	// Too big buffer size can increase the latency time.
 	// On the other hand, too small buffer size can cause glitch noises due to buffer shortage.
 	BufferSize time.Duration
+
+	// ApplicationName specifies the name of the client application.
+	// It is used for PulseAudio's volume control UI and so on.
+	ApplicationName string
 }
 
 // NewContext creates a new context with given options.
 // A context creates and holds ready-to-use Player objects.
-// NewContext returns a context, a channel that is closed when the context is ready, and an error if it exists.
+// NewContext returns a context, a channel that closes when initialization finishes, and an error if it exists.
+// After the channel closes, call Context.Err to check whether initialization succeeded.
 //
 // Creating multiple contexts is NOT supported.
 func NewContext(options *NewContextOptions) (*Context, chan struct{}, error) {
@@ -91,13 +97,13 @@ func NewContext(options *NewContextOptions) (*Context, chan struct{}, error) {
 
 	var bufferSizeInBytes int
 	if options.BufferSize != 0 {
-		// The underying driver always uses 32bit floats.
+		// The underlying driver always uses 32bit floats.
 		bytesPerSample := options.ChannelCount * 4
 		bytesPerSecond := options.SampleRate * bytesPerSample
 		bufferSizeInBytes = int(int64(options.BufferSize) * int64(bytesPerSecond) / int64(time.Second))
 		bufferSizeInBytes = bufferSizeInBytes / bytesPerSample * bytesPerSample
 	}
-	ctx, ready, err := newContext(options.SampleRate, options.ChannelCount, mux.Format(options.Format), bufferSizeInBytes)
+	ctx, ready, err := newContext(options.SampleRate, options.ChannelCount, mux.Format(options.Format), bufferSizeInBytes, options.ApplicationName)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -106,6 +112,9 @@ func NewContext(options *NewContextOptions) (*Context, chan struct{}, error) {
 
 // NewPlayer creates a new, ready-to-use Player belonging to the Context.
 // It is safe to create multiple players.
+//
+// The returned player must be kept reachable as long as it should keep playing.
+// A player is closed when it becomes unreachable, even in the middle of playing.
 //
 // The format of r is as follows:
 //
@@ -119,8 +128,9 @@ func NewContext(options *NewContextOptions) (*Context, chan struct{}, error) {
 // Read data from r is queued to the player's underlying buffer.
 // The underlying buffer is consumed by its playing.
 // Then, r's position and the current playing position don't necessarily match.
-// If you want to clear the underlying buffer for some reasons e.g., you want to seek the position of r,
-// call the player's Reset function.
+// If you want to seek the position of r, call the player's Seek function,
+// which also clears the underlying buffer.
+// If you want to stop using r e.g., you want to close r, call the player's PauseAndStopReading function.
 //
 // You cannot share r by multiple players.
 //
@@ -154,7 +164,9 @@ func (c *Context) Resume() error {
 	return c.context.Resume()
 }
 
-// Err returns the current error.
+// Err returns an error that occurred in the audio driver, if any.
+// Errors reported by Err are fatal: once Err returns a non-nil error,
+// this context is no longer usable.
 //
 // Err is concurrent-safe.
 func (c *Context) Err() error {
@@ -166,12 +178,16 @@ type atomicError struct {
 	m   sync.Mutex
 }
 
-func (a *atomicError) TryStore(err error) {
+// Join records err in addition to the errors recorded so far. A nil err is
+// ignored.
+func (a *atomicError) Join(err error) {
+	if err == nil {
+		return
+	}
+
 	a.m.Lock()
 	defer a.m.Unlock()
-	if a.err == nil {
-		a.err = err
-	}
+	a.err = errors.Join(a.err, err)
 }
 
 func (a *atomicError) Load() error {

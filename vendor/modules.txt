@@ -1,8 +1,8 @@
-# github.com/anchore/go-lzo v0.1.0
+# github.com/anchore/go-lzo v0.1.1
 ## explicit; go 1.24.0
 github.com/anchore/go-lzo
-# github.com/ebitengine/gomobile v0.0.0-20250923094054-ea854a63cce1
-## explicit; go 1.24.0
+# github.com/ebitengine/gomobile v0.0.0-20260820040257-d11f821a26a6
+## explicit; go 1.25.0
 github.com/ebitengine/gomobile/app
 github.com/ebitengine/gomobile/app/internal/callfn
 github.com/ebitengine/gomobile/event/key
@@ -16,14 +16,15 @@ github.com/ebitengine/gomobile/internal/mobileinit
 # github.com/ebitengine/hideconsole v1.0.0
 ## explicit; go 1.18
 github.com/ebitengine/hideconsole
-# github.com/ebitengine/oto/v3 v3.4.0
-## explicit; go 1.24.0
+# github.com/ebitengine/oto/v3 v3.5.0
+## explicit; go 1.25.0
 github.com/ebitengine/oto/v3
 github.com/ebitengine/oto/v3/internal/mux
 github.com/ebitengine/oto/v3/internal/oboe
-# github.com/ebitengine/purego v0.9.0
-## explicit; go 1.18
+# github.com/ebitengine/purego v0.11.0
+## explicit; go 1.25.0
 github.com/ebitengine/purego
+github.com/ebitengine/purego/cstrings
 github.com/ebitengine/purego/internal/cgo
 github.com/ebitengine/purego/internal/fakecgo
 github.com/ebitengine/purego/internal/strings
@@ -35,11 +36,12 @@ github.com/google/go-cmp/cmp/internal/diff
 github.com/google/go-cmp/cmp/internal/flags
 github.com/google/go-cmp/cmp/internal/function
 github.com/google/go-cmp/cmp/internal/value
-# github.com/hajimehoshi/ebiten/v2 v2.9.9
-## explicit; go 1.24.0
+# github.com/hajimehoshi/ebiten/v2 v2.10.0
+## explicit; go 1.25.0
 github.com/hajimehoshi/ebiten/v2
 github.com/hajimehoshi/ebiten/v2/audio
 github.com/hajimehoshi/ebiten/v2/audio/internal/convert
+github.com/hajimehoshi/ebiten/v2/audio/internal/vmaudio
 github.com/hajimehoshi/ebiten/v2/audio/vorbis
 github.com/hajimehoshi/ebiten/v2/ebitenutil
 github.com/hajimehoshi/ebiten/v2/inpututil
@@ -49,7 +51,12 @@ github.com/hajimehoshi/ebiten/v2/internal/buffered
 github.com/hajimehoshi/ebiten/v2/internal/builtinshader
 github.com/hajimehoshi/ebiten/v2/internal/clock
 github.com/hajimehoshi/ebiten/v2/internal/cocoa
+github.com/hajimehoshi/ebiten/v2/internal/color
+github.com/hajimehoshi/ebiten/v2/internal/colormode
+github.com/hajimehoshi/ebiten/v2/internal/colormshader
 github.com/hajimehoshi/ebiten/v2/internal/debug
+github.com/hajimehoshi/ebiten/v2/internal/exeicon
+github.com/hajimehoshi/ebiten/v2/internal/fbdev
 github.com/hajimehoshi/ebiten/v2/internal/file
 github.com/hajimehoshi/ebiten/v2/internal/gamepad
 github.com/hajimehoshi/ebiten/v2/internal/gamepaddb
@@ -64,51 +71,57 @@ github.com/hajimehoshi/ebiten/v2/internal/graphicsdriver/metal/mtl
 github.com/hajimehoshi/ebiten/v2/internal/graphicsdriver/opengl
 github.com/hajimehoshi/ebiten/v2/internal/graphicsdriver/opengl/gl
 github.com/hajimehoshi/ebiten/v2/internal/graphicsdriver/playstation5
+github.com/hajimehoshi/ebiten/v2/internal/graphicsdriver/remote
 github.com/hajimehoshi/ebiten/v2/internal/hook
 github.com/hajimehoshi/ebiten/v2/internal/inputstate
+github.com/hajimehoshi/ebiten/v2/internal/legacyshader
+github.com/hajimehoshi/ebiten/v2/internal/mathutil
 github.com/hajimehoshi/ebiten/v2/internal/microsoftgdk
 github.com/hajimehoshi/ebiten/v2/internal/mipmap
 github.com/hajimehoshi/ebiten/v2/internal/packing
 github.com/hajimehoshi/ebiten/v2/internal/png
-github.com/hajimehoshi/ebiten/v2/internal/restorable
 github.com/hajimehoshi/ebiten/v2/internal/shader
 github.com/hajimehoshi/ebiten/v2/internal/shaderir
 github.com/hajimehoshi/ebiten/v2/internal/shaderir/glsl
 github.com/hajimehoshi/ebiten/v2/internal/shaderir/hlsl
 github.com/hajimehoshi/ebiten/v2/internal/shaderir/msl
+github.com/hajimehoshi/ebiten/v2/internal/shaderprecomp
 github.com/hajimehoshi/ebiten/v2/internal/thread
 github.com/hajimehoshi/ebiten/v2/internal/ui
 github.com/hajimehoshi/ebiten/v2/internal/vibrate
+github.com/hajimehoshi/ebiten/v2/internal/vmguest
+github.com/hajimehoshi/ebiten/v2/internal/vmprotocol
+github.com/hajimehoshi/ebiten/v2/internal/windowsystem
 github.com/hajimehoshi/ebiten/v2/internal/winver
 github.com/hajimehoshi/ebiten/v2/vector
-# github.com/jezek/xgb v1.1.1
-## explicit; go 1.11
-github.com/jezek/xgb
-github.com/jezek/xgb/randr
-github.com/jezek/xgb/render
-github.com/jezek/xgb/xproto
 # github.com/jfreymuth/oggvorbis v1.0.5
 ## explicit; go 1.15
 github.com/jfreymuth/oggvorbis
+# github.com/jfreymuth/pulse v0.1.3
+## explicit; go 1.12
+github.com/jfreymuth/pulse
+github.com/jfreymuth/pulse/proto
 # github.com/jfreymuth/vorbis v1.0.2
 ## explicit; go 1.15
 github.com/jfreymuth/vorbis
-# golang.org/x/image v0.40.0
-## explicit; go 1.25.0
+# golang.org/x/image v0.46.0
+## explicit; go 1.26.0
 golang.org/x/image/font
 golang.org/x/image/font/opentype
 golang.org/x/image/font/sfnt
 golang.org/x/image/math/fixed
 golang.org/x/image/vector
-# golang.org/x/sync v0.20.0
-## explicit; go 1.25.0
+# golang.org/x/sync v0.23.0
+## explicit; go 1.26.0
 golang.org/x/sync/errgroup
-# golang.org/x/sys v0.36.0
-## explicit; go 1.24.0
+# golang.org/x/sys v0.48.0
+## explicit; go 1.26.0
+golang.org/x/sys/cpu
 golang.org/x/sys/unix
 golang.org/x/sys/windows
-# golang.org/x/text v0.37.0
-## explicit; go 1.25.0
+golang.org/x/sys/windows/registry
+# golang.org/x/text v0.42.0
+## explicit; go 1.26.0
 golang.org/x/text/encoding
 golang.org/x/text/encoding/charmap
 golang.org/x/text/encoding/internal

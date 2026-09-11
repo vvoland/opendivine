@@ -12,12 +12,17 @@ import (
 	"reflect"
 	"regexp"
 	"runtime"
+	"slices"
+	stdstrings "strings"
+	"structs"
 	"unicode"
 	"unsafe"
 
 	"github.com/ebitengine/purego"
 	"github.com/ebitengine/purego/internal/strings"
 )
+
+var hostLayoutType = reflect.TypeFor[structs.HostLayout]()
 
 // TODO: support try/catch?
 // https://stackoverflow.com/questions/7062599/example-of-how-objective-cs-try-catch-implementation-is-executed-at-runtime
@@ -170,6 +175,7 @@ func Send[T any](id ID, sel SEL, args ...any) T {
 // as the receiver of a message. It specifies the class definition of the particular superclass that should
 // be messaged.
 type objc_super struct {
+	_          structs.HostLayout
 	receiver   ID
 	superClass Class
 }
@@ -209,7 +215,7 @@ func SendSuper[T any](id ID, sel SEL, args ...any) T {
 type SEL uintptr
 
 // RegisterName registers a method with the Objective-C runtime system, maps the method name to a selector,
-// and returns the selector value. This function grabs the global Objective-c lock. It is best the cache the
+// and returns the selector value. This function grabs the global Objective-c lock. It is best to cache the
 // result of this function.
 func RegisterName(name string) SEL {
 	return sel_registerName(name)
@@ -237,7 +243,7 @@ type MethodDef struct {
 //
 //	@property (readwrite) float value;
 //
-// In Go, the functions can be accessed as followed:
+// In Go, the functions can be accessed as follows:
 //
 //	var value = purego.Send[float32](id, purego.RegisterName("value"))
 //	id.Send(purego.RegisterName("setValue:"), 3.46)
@@ -320,7 +326,7 @@ func RegisterClass(name string, superClass Class, protocols []*Protocol, ivars [
 		case ReadWrite:
 			ty := reflect.FuncOf(
 				[]reflect.Type{
-					reflect.TypeOf(ID(0)), reflect.TypeOf(SEL(0)), ivar.Type,
+					reflect.TypeFor[ID](), reflect.TypeFor[SEL](), ivar.Type,
 				},
 				nil, false,
 			)
@@ -341,7 +347,10 @@ func RegisterClass(name string, superClass Class, protocols []*Protocol, ivars [
 				//	})(unsafe.Pointer(args[0].Interface().(ID)))).v = 123
 				//
 				// However, since the type of the variable is unknown reflection is used to actually assign the value
-				id := args[0].Interface().(ID)
+				id, ok := reflect.TypeAssert[ID](args[0])
+				if !ok {
+					panic(fmt.Sprintf("objc: id argument is not a ID but %s", args[0].Type().String()))
+				}
 				ptr := *(*unsafe.Pointer)(unsafe.Pointer(&id)) // circumvent go vet
 				reflect.NewAt(ivar.Type, unsafe.Add(ptr, offset)).Elem().Set(args[2])
 				return nil
@@ -353,7 +362,7 @@ func RegisterClass(name string, superClass Class, protocols []*Protocol, ivars [
 		case ReadOnly:
 			ty := reflect.FuncOf(
 				[]reflect.Type{
-					reflect.TypeOf(ID(0)), reflect.TypeOf(SEL(0)),
+					reflect.TypeFor[ID](), reflect.TypeFor[SEL](),
 				},
 				[]reflect.Type{ivar.Type}, false,
 			)
@@ -366,7 +375,10 @@ func RegisterClass(name string, superClass Class, protocols []*Protocol, ivars [
 				if len(args) != 2 {
 					panic(fmt.Sprintf("objc: incorrect number of args. expected 2 got %d", len(args)))
 				}
-				id := args[0].Interface().(ID)
+				id, ok := reflect.TypeAssert[ID](args[0])
+				if !ok {
+					panic(fmt.Sprintf("objc: id argument is not a ID but %s", args[0].Type().String()))
+				}
 				ptr := *(*unsafe.Pointer)(unsafe.Pointer(&id)) // circumvent go vet
 				// the variable is located at an offset from the id
 				return []reflect.Value{reflect.NewAt(ivar.Type, unsafe.Add(ptr, offset)).Elem()}
@@ -394,8 +406,8 @@ const (
 	encUShort      = "S"
 	encInt         = "i"
 	encUInt        = "I"
-	encLong        = "l"
-	encULong       = "L"
+	encLongLong    = "q"
+	encULongLong   = "Q"
 	encFloat       = "f"
 	encDouble      = "d"
 	encBool        = "B"
@@ -411,11 +423,11 @@ const (
 // Source: https://developer.apple.com/library/archive/documentation/Cocoa/Conceptual/ObjCRuntimeGuide/Articles/ocrtTypeEncodings.html#//apple_ref/doc/uid/TP40008048-CH100
 func encodeType(typ reflect.Type, insidePtr bool) (string, error) {
 	switch typ {
-	case reflect.TypeOf(Class(0)):
+	case reflect.TypeFor[Class]():
 		return encClass, nil
-	case reflect.TypeOf(ID(0)), reflect.TypeOf(Block(0)):
+	case reflect.TypeFor[ID](), reflect.TypeFor[Block]():
 		return encId, nil
-	case reflect.TypeOf(SEL(0)):
+	case reflect.TypeFor[SEL]():
 		return encSelector, nil
 	}
 
@@ -424,7 +436,7 @@ func encodeType(typ reflect.Type, insidePtr bool) (string, error) {
 	case reflect.Bool:
 		return encBool, nil
 	case reflect.Int:
-		return encLong, nil
+		return encLongLong, nil
 	case reflect.Int8:
 		return encChar, nil
 	case reflect.Int16:
@@ -432,9 +444,9 @@ func encodeType(typ reflect.Type, insidePtr bool) (string, error) {
 	case reflect.Int32:
 		return encInt, nil
 	case reflect.Int64:
-		return encULong, nil
+		return encLongLong, nil
 	case reflect.Uint:
-		return encULong, nil
+		return encULongLong, nil
 	case reflect.Uint8:
 		return encUChar, nil
 	case reflect.Uint16:
@@ -442,33 +454,41 @@ func encodeType(typ reflect.Type, insidePtr bool) (string, error) {
 	case reflect.Uint32:
 		return encUInt, nil
 	case reflect.Uint64:
-		return encULong, nil
+		return encULongLong, nil
 	case reflect.Uintptr:
 		return encPtr, nil
 	case reflect.Float32:
 		return encFloat, nil
 	case reflect.Float64:
 		return encDouble, nil
-	case reflect.Ptr:
+	case reflect.Pointer:
 		enc, err := encodeType(typ.Elem(), true)
 		return encPtr + enc, err
 	case reflect.Struct:
 		if insidePtr {
 			return encStructBegin + typ.Name() + encStructEnd, nil
 		}
-		encoding := encStructBegin
-		encoding += typ.Name()
-		encoding += "="
-		for i := 0; i < typ.NumField(); i++ {
+		var encoding stdstrings.Builder
+		encoding.WriteString(encStructBegin)
+		encoding.WriteString(typ.Name())
+		encoding.WriteString("=")
+		for i := range typ.NumField() {
 			f := typ.Field(i)
+			if f.Type.ConvertibleTo(hostLayoutType) {
+				// The structs.HostLayout marker is a signal to the Go compiler
+				// with no counterpart in C, so it is not a member as far as
+				// @encode is concerned. Other zero-sized fields are: clang
+				// encodes a zero-length array member as [0c].
+				continue
+			}
 			tmp, err := encodeType(f.Type, false)
 			if err != nil {
 				return "", err
 			}
-			encoding += tmp
+			encoding.WriteString(tmp)
 		}
-		encoding += encStructEnd
-		return encoding, nil
+		encoding.WriteString(encStructEnd)
+		return encoding.String(), nil
 	case reflect.UnsafePointer:
 		return encUnsafePtr, nil
 	case reflect.String:
@@ -485,16 +505,16 @@ func encodeFunc(fn any) (string, error) {
 		return "", errors.New("not a func")
 	}
 
-	encoding := ""
+	var encoding stdstrings.Builder
 	switch typ.NumOut() {
 	case 0:
-		encoding += encVoid
+		encoding.WriteString(encVoid)
 	case 1:
 		tmp, err := encodeType(typ.Out(0), false)
 		if err != nil {
 			return "", err
 		}
-		encoding += tmp
+		encoding.WriteString(tmp)
 	default:
 		return "", errors.New("too many output parameters")
 	}
@@ -503,16 +523,16 @@ func encodeFunc(fn any) (string, error) {
 		return "", errors.New("func doesn't take ID and SEL as its first two parameters")
 	}
 
-	encoding += encId
+	encoding.WriteString(encId)
 
 	for i := 1; i < typ.NumIn(); i++ {
 		tmp, err := encodeType(typ.In(i), false)
 		if err != nil {
 			return "", err
 		}
-		encoding += tmp
+		encoding.WriteString(tmp)
 	}
-	return encoding, nil
+	return encoding.String(), nil
 }
 
 // SuperClass returns the superclass of a class.
@@ -562,7 +582,9 @@ func (i Ivar) Name() string {
 }
 
 // MethodDescription holds the name and type definition of a method.
+// It matches the Objective-C runtime's struct objc_method_description.
 type MethodDescription struct {
+	_           structs.HostLayout
 	name, types uintptr
 }
 
@@ -577,7 +599,9 @@ func (m MethodDescription) Types() string {
 }
 
 // PropertyAttribute contains the null-terminated Name and Value pair of a Properties internal description.
+// It matches the Objective-C runtime's objc_property_attribute_t.
 type PropertyAttribute struct {
+	_           structs.HostLayout
 	Name, Value *byte
 }
 
@@ -617,7 +641,7 @@ func (p *Protocol) Register() {
 func (p *Protocol) CopyMethodDescriptionList(isRequiredMethod, isInstanceMethod bool) []MethodDescription {
 	count := uint32(0)
 	desc := protocol_copyMethodDescriptionList(p, isRequiredMethod, isInstanceMethod, &count)
-	methods := clone(unsafe.Slice(desc, count))
+	methods := slices.Clone(unsafe.Slice(desc, count))
 	free(unsafe.Pointer(desc))
 	return methods
 }
@@ -626,7 +650,7 @@ func (p *Protocol) CopyMethodDescriptionList(isRequiredMethod, isInstanceMethod 
 func (p *Protocol) CopyProtocolList() []*Protocol {
 	count := uint32(0)
 	desc := protocol_copyProtocolList(p, &count)
-	protocols := clone(unsafe.Slice(desc, count))
+	protocols := slices.Clone(unsafe.Slice(desc, count))
 	free(unsafe.Pointer(desc))
 	return protocols
 }
@@ -635,7 +659,7 @@ func (p *Protocol) CopyProtocolList() []*Protocol {
 func (p *Protocol) CopyPropertyList(isRequiredProperty, isInstanceProperty bool) []Property {
 	count := uint32(0)
 	desc := protocol_copyPropertyList2(p, &count, isRequiredProperty, isInstanceProperty)
-	protocols := clone(unsafe.Slice(desc, count))
+	protocols := slices.Clone(unsafe.Slice(desc, count))
 	free(unsafe.Pointer(desc))
 	return protocols
 }
@@ -682,21 +706,10 @@ func NewIMP(fn any) IMP {
 	switch {
 	case ty.NumIn() < 2:
 		fallthrough
-	case ty.In(0) != reflect.TypeOf(ID(0)):
+	case ty.In(0) != reflect.TypeFor[ID]():
 		fallthrough
-	case ty.In(1) != reflect.TypeOf(SEL(0)):
+	case ty.In(1) != reflect.TypeFor[SEL]():
 		panic("objc: NewIMP must take a (id, SEL) as its first two arguments; got " + ty.String())
 	}
 	return IMP(purego.NewCallback(fn))
-}
-
-// TODO: remove and use slices.Clone when minimum version for purego is 1.21
-func clone[S ~[]E, E any](s S) S {
-	// Preserve nilness in case it matters.
-	if s == nil {
-		return nil
-	}
-	// Avoid s[:0:0] as it leads to unwanted liveness when cloning a
-	// zero-length slice of a large array; see https://go.dev/issue/68488.
-	return append(S{}, s...)
 }

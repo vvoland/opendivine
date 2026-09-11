@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
+	"structs"
 	"syscall"
 	"unsafe"
 
@@ -25,12 +26,15 @@ import (
 )
 
 const (
-	_CLSCTX_INPROC_SERVER     = 0x1
-	_CLSCTX_LOCAL_SERVER      = 0x4
-	_CLSCTX_REMOTE_SERVER     = 0x10
-	_CLSCTX_SERVER            = _CLSCTX_INPROC_SERVER | _CLSCTX_LOCAL_SERVER | _CLSCTX_REMOTE_SERVER
-	_MONITOR_DEFAULTTONEAREST = 2
-	_SM_CYCAPTION             = 4
+	_CLSCTX_INPROC_SERVER          = 0x1
+	_CLSCTX_LOCAL_SERVER           = 0x4
+	_CLSCTX_REMOTE_SERVER          = 0x10
+	_CLSCTX_SERVER                 = _CLSCTX_INPROC_SERVER | _CLSCTX_LOCAL_SERVER | _CLSCTX_REMOTE_SERVER
+	_DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+	_MONITOR_DEFAULTTONEAREST      = 2
+	_SM_CYCAPTION                  = 4
+	_VK_CAPITAL                    = 0x14
+	_VK_NUMLOCK                    = 0x90
 )
 
 var (
@@ -49,6 +53,7 @@ var (
 )
 
 type _RECT struct {
+	_      structs.HostLayout
 	left   int32
 	top    int32
 	right  int32
@@ -56,6 +61,7 @@ type _RECT struct {
 }
 
 type _MONITORINFO struct {
+	_         structs.HostLayout
 	cbSize    uint32
 	rcMonitor _RECT
 	rcWork    _RECT
@@ -63,14 +69,18 @@ type _MONITORINFO struct {
 }
 
 type _POINT struct {
+	_ structs.HostLayout
 	x int32
 	y int32
 }
 
 var (
+	dwmapi = windows.NewLazySystemDLL("dwmapi.dll")
 	imm32  = windows.NewLazySystemDLL("imm32.dll")
 	ole32  = windows.NewLazySystemDLL("ole32.dll")
 	user32 = windows.NewLazySystemDLL("user32.dll")
+
+	procDwmSetWindowAttribute = dwmapi.NewProc("DwmSetWindowAttribute")
 
 	procImmAssociateContext = imm32.NewProc("ImmAssociateContext")
 
@@ -80,6 +90,7 @@ var (
 	procMonitorFromWindow = user32.NewProc("MonitorFromWindow")
 	procGetMonitorInfoW   = user32.NewProc("GetMonitorInfoW")
 	procGetCursorPos      = user32.NewProc("GetCursorPos")
+	procGetKeyState       = user32.NewProc("GetKeyState")
 )
 
 func _ImmAssociateContext(hwnd windows.HWND, hIMC uintptr) (uintptr, error) {
@@ -117,7 +128,7 @@ func _MonitorFromWindow(hwnd windows.HWND, dwFlags uint32) uintptr {
 }
 
 func _GetMonitorInfoW(hMonitor uintptr) (_MONITORINFO, error) {
-	mi := _MONITORINFO{}
+	var mi _MONITORINFO
 	mi.cbSize = uint32(unsafe.Sizeof(mi))
 
 	r, _, e := procGetMonitorInfoW.Call(hMonitor, uintptr(unsafe.Pointer(&mi)))
@@ -142,11 +153,29 @@ func _GetCursorPos() (int32, int32, error) {
 	return pt.x, pt.y, nil
 }
 
+func _GetKeyState(nVirtKey int) int16 {
+	r, _, _ := procGetKeyState.Call(uintptr(nVirtKey))
+	return int16(r)
+}
+
+func _DwmSetWindowAttribute(hwnd windows.HWND, dwAttribute uint32, pvAttribute unsafe.Pointer, cbAttribute uint32) error {
+	r, _, e := procDwmSetWindowAttribute.Call(uintptr(hwnd), uintptr(dwAttribute), uintptr(pvAttribute), uintptr(cbAttribute))
+	if uint32(r) != uint32(windows.S_OK) {
+		if e != nil && !errors.Is(e, windows.ERROR_SUCCESS) {
+			return fmt.Errorf("ui: DwmSetWindowAttribute failed: error code: %w", e)
+		}
+		return fmt.Errorf("ui: DwmSetWindowAttribute failed: HRESULT(%d)", uint32(r))
+	}
+	return nil
+}
+
 type _ITaskbarList struct {
+	_    structs.HostLayout
 	vtbl *_ITaskbarList_Vtbl
 }
 
 type _ITaskbarList_Vtbl struct {
+	_              structs.HostLayout
 	QueryInterface uintptr
 	AddRef         uintptr
 	Release        uintptr

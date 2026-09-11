@@ -24,6 +24,18 @@ const (
 	avAudioSessionErrorCodeCannotStartPlaying    = 0x21706c61 // '!pla'
 	avAudioSessionErrorCodeCannotInterruptOthers = 0x21696e74 // '!int'
 	avAudioSessionErrorCodeSiriIsRecording       = 0x73697269 // 'siri'
+	avAudioSessionErrorCodeUnspecified           = 0x77686174 // 'what'
+)
+
+const (
+	kAudioQueueErr_QueueInvalidated = 0xfffefb91
+)
+
+const (
+	// kAudioHardwareIllegalOperationError is returned by AudioQueueStart when the
+	// operation is not possible at the moment, e.g. while media services are
+	// restarting (#242).
+	kAudioHardwareIllegalOperationError = 0x6e6f7065 // 'nope'
 )
 
 const (
@@ -81,6 +93,10 @@ func initializeAPI() error {
 	purego.RegisterLibFunc(&_AudioQueueEnqueueBuffer, toolbox, "AudioQueueEnqueueBuffer")
 	purego.RegisterLibFunc(&_AudioQueueStart, toolbox, "AudioQueueStart")
 	purego.RegisterLibFunc(&_AudioQueuePause, toolbox, "AudioQueuePause")
+	purego.RegisterLibFunc(&_AudioQueueDispose, toolbox, "AudioQueueDispose")
+
+	initializeSessionAPI()
+
 	return nil
 }
 
@@ -93,3 +109,5 @@ var _AudioQueueEnqueueBuffer func(inAQ _AudioQueueRef, inBuffer _AudioQueueBuffe
 var _AudioQueueStart func(inAQ _AudioQueueRef, inStartTime *_AudioTimeStamp) uintptr
 
 var _AudioQueuePause func(inAQ _AudioQueueRef) uintptr
+
+var _AudioQueueDispose func(inAQ _AudioQueueRef, inImmediate bool) uintptr

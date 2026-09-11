@@ -28,6 +28,8 @@ func opString(op shaderir.Op) string {
 		return "-"
 	case shaderir.NotOp:
 		return "!"
+	case shaderir.ComplementOp:
+		return "~"
 	case shaderir.ComponentWiseMul, shaderir.MatrixMul:
 		return "*"
 	case shaderir.Div:
@@ -122,10 +124,7 @@ func (c *compileContext) builtinFuncString(f shaderir.BuiltinFunc) string {
 	case shaderir.Dfdy:
 		return "dFdy"
 	case shaderir.TexelAt:
-		if c.unit == shaderir.Pixels {
-			return "texelFetch"
-		}
-		return "texture"
+		return "texelFetch"
 	default:
 		return string(f)
 	}

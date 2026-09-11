@@ -16,6 +16,7 @@ package gamepad
 
 import (
 	"fmt"
+	"structs"
 	"syscall"
 	"unsafe"
 
@@ -147,6 +148,75 @@ var (
 	procSetWindowLongPtrW = user32.NewProc("SetWindowLongPtrW") // 64-Bit Windows version.
 )
 
+var (
+	procDirectInput8Create *windows.LazyProc
+
+	procXInputGetCapabilities *windows.LazyProc
+	procXInputGetState        *windows.LazyProc
+	procXInputSetState        *windows.LazyProc
+)
+
+func loadDInput8() error {
+	dinput8 := windows.NewLazySystemDLL("dinput8.dll")
+	if err := dinput8.Load(); err != nil {
+		return nil
+	}
+
+	proc := dinput8.NewProc("DirectInput8Create")
+	if err := proc.Find(); err != nil {
+		return err
+	}
+	procDirectInput8Create = proc
+
+	return nil
+}
+
+func loadXInput() error {
+	// TODO: Loading xinput1_4.dll or xinput9_1_0.dll should be enough.
+	// See https://source.chromium.org/chromium/chromium/src/+/main:device/gamepad/xinput_data_fetcher_win.cc;l=75-84;drc=643cdf61903e99f27c3d80daee67e217e9d280e0
+	for _, name := range []string{
+		"xinput1_4.dll",
+		"xinput1_3.dll",
+		"xinput9_1_0.dll",
+		"xinput1_2.dll",
+		"xinput1_1.dll",
+	} {
+		xinput := windows.NewLazySystemDLL(name)
+		if err := xinput.Load(); err != nil {
+			continue
+		}
+
+		getCapabilities := xinput.NewProc("XInputGetCapabilities")
+		if err := getCapabilities.Find(); err != nil {
+			return err
+		}
+		getState := xinput.NewProc("XInputGetState")
+		if err := getState.Find(); err != nil {
+			return err
+		}
+		setState := xinput.NewProc("XInputSetState")
+		if err := setState.Find(); err != nil {
+			return err
+		}
+
+		procXInputGetCapabilities = getCapabilities
+		procXInputGetState = getState
+		procXInputSetState = setState
+
+		break
+	}
+
+	return nil
+}
+
+func isDInput8DLLAvailable() bool {
+	return procDirectInput8Create != nil
+}
+
+func isXInputDLLAvailable() bool {
+	return procXInputGetCapabilities != nil
+}
+
 func _GetModuleHandleW() (uintptr, error) {
 	m, _, e := procGetModuleHandleW.Call(0)
 	if m == 0 {
@@ -204,7 +274,43 @@ func _SetWindowLongPtrW(hWnd windows.HWND, nIndex int32, dwNewLong uintptr) (uin
 	return h, nil
 }
 
+func _DirectInput8Create(hinst uintptr, dwVersion uint32, riidltf *windows.GUID, ppvOut **_IDirectInput8W, punkOuter unsafe.Pointer) error {
+	r, _, _ := procDirectInput8Create.Call(hinst, uintptr(dwVersion), uintptr(unsafe.Pointer(riidltf)), uintptr(unsafe.Pointer(ppvOut)), uintptr(punkOuter))
+	if uint32(r) != _DI_OK {
+		return fmt.Errorf("gamepad: DirectInput8Create failed: %w", handleError(windows.Handle(uint32(r))))
+	}
+	return nil
+}
+
+func _XInputGetCapabilities(dwUserIndex uint32, dwFlags uint32, pCapabilities *_XINPUT_CAPABILITIES) error {
+	// XInputGetCapabilities doesn't call SetLastError and returns an error code directly.
+	r, _, _ := procXInputGetCapabilities.Call(uintptr(dwUserIndex), uintptr(dwFlags), uintptr(unsafe.Pointer(pCapabilities)))
+	if e := syscall.Errno(uint32(r)); e != windows.ERROR_SUCCESS {
+		return fmt.Errorf("gamepad: XInputGetCapabilities failed: %w", e)
+	}
+	return nil
+}
+
+func _XInputGetState(dwUserIndex uint32, pState *_XINPUT_STATE) error {
+	// XInputGetState doesn't call SetLastError and returns an error code directly.
+	r, _, _ := procXInputGetState.Call(uintptr(dwUserIndex), uintptr(unsafe.Pointer(pState)))
+	if e := syscall.Errno(uint32(r)); e != windows.ERROR_SUCCESS {
+		return fmt.Errorf("gamepad: XInputGetState failed: %w", e)
+	}
+	return nil
+}
+
+func _XInputSetState(dwUserIndex uint32, pVibration *_XINPUT_VIBRATION) error {
+	// XInputSetState doesn't call SetLastError and returns an error code directly.
+	r, _, _ := procXInputSetState.Call(uintptr(dwUserIndex), uintptr(unsafe.Pointer(pVibration)))
+	if e := syscall.Errno(uint32(r)); e != windows.ERROR_SUCCESS {
+		return fmt.Errorf("gamepad: XInputSetState failed: %w", e)
+	}
+	return nil
+}
+
 type _DIDATAFORMAT struct {
+	_          structs.HostLayout
 	dwSize     uint32
 	dwObjSize  uint32
 	dwFlags    uint32
@@ -214,6 +320,7 @@ type _DIDATAFORMAT struct {
 }
 
 type _DIDEVCAPS struct {
+	_                     structs.HostLayout
 	dwSize                uint32
 	dwFlags               uint32
 	dwDevType             uint32
@@ -228,6 +335,7 @@ type _DIDEVCAPS struct {
 }
 
 type _DIDEVICEINSTANCEW struct {
+	_               structs.HostLayout
 	dwSize          uint32
 	guidInstance    windows.GUID
 	guidProduct     windows.GUID
@@ -240,6 +348,7 @@ type _DIDEVICEINSTANCEW struct {
 }
 
 type _DIDEVICEOBJECTINSTANCEW struct {
+	_                   structs.HostLayout
 	dwSize              uint32
 	guidType            windows.GUID
 	dwOfs               uint32
@@ -258,6 +367,7 @@ type _DIDEVICEOBJECTINSTANCEW struct {
 }
 
 type _DIJOYSTATE struct {
+	_          structs.HostLayout
 	lX         int32
 	lY         int32
 	lZ         int32
@@ -270,6 +380,7 @@ type _DIJOYSTATE struct {
 }
 
 type _DIOBJECTDATAFORMAT struct {
+	_       structs.HostLayout
 	pguid   *windows.GUID
 	dwOfs   uint32
 	dwType  uint32
@@ -277,17 +388,20 @@ type _DIOBJECTDATAFORMAT struct {
 }
 
 type _DIPROPDWORD struct {
+	_      structs.HostLayout
 	diph   _DIPROPHEADER
 	dwData uint32
 }
 
 type _DIPROPGUIDANDPATH struct {
+	_         structs.HostLayout
 	diph      _DIPROPHEADER
 	guidClass windows.GUID
 	wszPath   [_MAX_PATH]uint16
 }
 
 type _DIPROPHEADER struct {
+	_            structs.HostLayout
 	dwSize       uint32
 	dwHeaderSize uint32
 	dwObj        uint32
@@ -295,16 +409,19 @@ type _DIPROPHEADER struct {
 }
 
 type _DIPROPRANGE struct {
+	_    structs.HostLayout
 	diph _DIPROPHEADER
 	lMin int32
 	lMax int32
 }
 
 type _IDirectInput8W struct {
+	_    structs.HostLayout
 	vtbl *_IDirectInput8W_Vtbl
 }
 
 type _IDirectInput8W_Vtbl struct {
+	_              structs.HostLayout
 	QueryInterface uintptr
 	AddRef         uintptr
 	Release        uintptr
@@ -342,10 +459,12 @@ func (d *_IDirectInput8W) EnumDevices(dwDevType uint32, lpCallback uintptr, pvRe
 }
 
 type _IDirectInputDevice8W struct {
+	_    structs.HostLayout
 	vtbl *_IDirectInputDevice8W_Vtbl
 }
 
 type _IDirectInputDevice8W_Vtbl struct {
+	_              structs.HostLayout
 	QueryInterface uintptr
 	AddRef         uintptr
 	Release        uintptr
@@ -454,12 +573,14 @@ func (d *_IDirectInputDevice8W) SetProperty(rguidProp uintptr, pdiph *_DIPROPHEA
 }
 
 type _RID_DEVICE_INFO struct {
+	_      structs.HostLayout
 	cbSize uint32
 	dwType uint32
 	hid    _RID_DEVICE_INFO_HID // Originally, this member is a union.
 }
 
 type _RID_DEVICE_INFO_HID struct {
+	_               structs.HostLayout
 	dwVendorId      uint32
 	dwProductId     uint32
 	dwVersionNumber uint32
@@ -470,11 +591,13 @@ type _RID_DEVICE_INFO_HID struct {
 }
 
 type _RAWINPUTDEVICELIST struct {
+	_       structs.HostLayout
 	hDevice windows.Handle
 	dwType  uint32
 }
 
 type _XINPUT_CAPABILITIES struct {
+	_         structs.HostLayout
 	typ       byte
 	subType   byte
 	flags     uint16
@@ -483,6 +606,7 @@ type _XINPUT_CAPABILITIES struct {
 }
 
 type _XINPUT_GAMEPAD struct {
+	_             structs.HostLayout
 	wButtons      uint16
 	bLeftTrigger  byte
 	bRightTrigger byte
@@ -493,11 +617,13 @@ type _XINPUT_GAMEPAD struct {
 }
 
 type _XINPUT_STATE struct {
+	_              structs.HostLayout
 	dwPacketNumber uint32
 	Gamepad        _XINPUT_GAMEPAD
 }
 
 type _XINPUT_VIBRATION struct {
+	_                structs.HostLayout
 	wLeftMotorSpeed  uint16
 	wRightMotorSpeed uint16
 }

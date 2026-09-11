@@ -196,7 +196,7 @@ func (c *colorMImplBodyTranslate) scaleElements() (r, g, b, a float32) {
 
 func colorToFloat32s(clr color.Color) (float32, float32, float32, float32) {
 	r, g, b, a := clr.RGBA()
-	rf, gf, bf, af := float32(0.0), float32(0.0), float32(0.0), float32(0.0)
+	var rf, gf, bf, af float32
 	// Unmultiply alpha
 	if a > 0 {
 		rf = float32(r) / float32(a)
@@ -667,7 +667,7 @@ func (c *colorMImplBodyTranslate) Scale(r, g, b, a float32) ColorM {
 	}
 
 	eb := c.body
-	for i := 0; i < ColorMDim-1; i++ {
+	for i := range ColorMDim - 1 {
 		eb[i*(ColorMDim-1)] *= r
 		eb[i*(ColorMDim-1)+1] *= g
 		eb[i*(ColorMDim-1)+2] *= b
@@ -759,7 +759,7 @@ var (
 // saturationScale is a value to scale saturation.
 // valueScale is a value to scale value (a.k.a. brightness).
 //
-// This conversion uses RGB to/from YCrCb conversion.
+// This conversion uses RGB to/from YCbCr conversion.
 func ChangeHSV(c ColorM, hueTheta float64, saturationScale float32, valueScale float32) ColorM {
 	if hueTheta == 0 && saturationScale == 1 {
 		v := valueScale

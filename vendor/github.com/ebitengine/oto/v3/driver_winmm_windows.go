@@ -124,7 +124,7 @@ func (c *winmmContext) start() error {
 		wBitsPerSample:  bitsPerSample,
 	}
 
-	// TOOD: What about using an event instead of a callback? PortAudio and other libraries do that.
+	// TODO: What about using an event instead of a callback? PortAudio and other libraries do that.
 	w, err := waveOutOpen(f, waveOutOpenCallback)
 	if errors.Is(err, windows.ERROR_NOT_FOUND) {
 		// This can happen when no device is found (#77).
@@ -148,6 +148,13 @@ func (c *winmmContext) start() error {
 	for len(c.headers) < cap(c.headers) {
 		h, err := newHeader(c.waveOut, headerBufferSize)
 		if err != nil {
+			// Undo the partially initialized state, as this context is abandoned.
+			for _, hdr := range c.headers {
+				err = errors.Join(err, hdr.Close())
+			}
+			c.headers = nil
+			err = errors.Join(err, waveOutClose(c.waveOut))
+			c.waveOut = 0
 			return err
 		}
 		c.headers = append(c.headers, h)
@@ -195,7 +202,7 @@ func (c *winmmContext) isHeaderAvailable() bool {
 
 var waveOutOpenCallback = windows.NewCallback(func(hwo, uMsg, dwInstance, dwParam1, dwParam2 uintptr) uintptr {
 	// Queuing a header in this callback might not work especially when a headset is connected or disconnected.
-	// Just signal the condition vairable and don't do other things.
+	// Just signal the condition variable and don't do other things.
 	const womDone = 0x3bd
 	if uMsg != womDone {
 		return 0
@@ -217,7 +224,7 @@ func (c *winmmContext) waitUntilHeaderAvailable() bool {
 func (c *winmmContext) loop() {
 	defer func() {
 		if err := c.closeLoop(); err != nil {
-			c.err.TryStore(err)
+			c.err.Join(err)
 		}
 	}()
 	for {
@@ -290,7 +297,7 @@ func (c *winmmContext) appendBuffers() {
 				// This error can happen when e.g. a new HDMI connection is detected (#51).
 				// TODO: Retry later.
 			}
-			c.err.TryStore(fmt.Errorf("oto: Queueing the header failed: %v", err))
+			c.err.Join(fmt.Errorf("oto: Queueing the header failed: %v", err))
 		}
 		return
 	}

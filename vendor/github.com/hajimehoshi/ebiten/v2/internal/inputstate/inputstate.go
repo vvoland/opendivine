@@ -66,6 +66,18 @@ func (i *inputState) IsKeyJustReleased(key ui.Key) bool {
 	return i.state.IsKeyJustReleased(key, ui.Get().Tick())
 }
 
+func (i *inputState) IsCapsLockOn() bool {
+	i.m.Lock()
+	defer i.m.Unlock()
+	return i.state.IsCapsLockOn()
+}
+
+func (i *inputState) IsNumLockOn() bool {
+	i.m.Lock()
+	defer i.m.Unlock()
+	return i.state.IsNumLockOn()
+}
+
 func (i *inputState) KeyPressDuration(key ui.Key) int64 {
 	i.m.Lock()
 	defer i.m.Unlock()
@@ -160,7 +172,7 @@ func AppendTouchIDs[T ~int](touches []T) []T {
 	return touches
 }
 
-func (i *inputState) TouchPosition(id ui.TouchID) (int, int) {
+func (i *inputState) TouchPosition(id ui.TouchID) (float64, float64) {
 	i.m.Lock()
 	defer i.m.Unlock()
 

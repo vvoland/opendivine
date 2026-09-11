@@ -8,12 +8,15 @@ package glfw
 import (
 	"errors"
 	"fmt"
+	"image"
+	"log/slog"
 	"math"
 	"runtime"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
 
+	"github.com/hajimehoshi/ebiten/v2/internal/exeicon"
 	"github.com/hajimehoshi/ebiten/v2/internal/microsoftgdk"
 	"github.com/hajimehoshi/ebiten/v2/internal/winver"
 )
@@ -46,6 +49,10 @@ func (w *Window) getWindowExStyle() uint32 {
 
 	if w.floating {
 		style |= _WS_EX_TOPMOST
+	}
+
+	if w.platform.noRedirectionBitmap {
+		style |= _WS_EX_NOREDIRECTIONBITMAP
 	}
 
 	return style
@@ -1234,6 +1241,13 @@ func windowProc(hWnd windows.HWND, uMsg uint32, wParam _WPARAM, lParam _LPARAM) 
 
 var windowProcPtr = windows.NewCallbackCDecl(windowProc)
 
+// handleToWindow is accessed only from the OS thread that created the windows: it is written when
+// a window is created or destroyed, and it is read in windowProc and in platformPollEvents. Win32
+// delivers a window's messages only to the thread that created the window, even when a message is
+// sent from another thread, and internal/ui calls glfw functions on the main thread, which is
+// locked with runtime.LockOSThread. The only exception, PostEmptyEvent, merely posts a message to
+// the helper window, which is dispatched on the main thread as well.
+// Thus, no synchronization is needed here.
 var handleToWindow = map[windows.HWND]*Window{}
 
 func (w *Window) createNativeWindow(wndconfig *wndconfig, fbconfig *fbconfig) error {
@@ -1254,7 +1268,7 @@ func (w *Window) createNativeWindow(wndconfig *wndconfig, fbconfig *fbconfig) er
 		frameWidth = mi.rcMonitor.right - mi.rcMonitor.left
 		frameHeight = mi.rcMonitor.bottom - mi.rcMonitor.top
 	} else {
-		rect := _RECT{0, 0, int32(wndconfig.width), int32(wndconfig.height)}
+		rect := _RECT{left: 0, top: 0, right: int32(wndconfig.width), bottom: int32(wndconfig.height)}
 
 		w.platform.maximized = wndconfig.maximized
 		if wndconfig.maximized {
@@ -1376,12 +1390,68 @@ func (w *Window) createNativeWindow(wndconfig *wndconfig, fbconfig *fbconfig) er
 		w.platform.transparent = true
 	}
 
+	if err := w.setIconFromExecutable(); err != nil {
+		return err
+	}
+
 	width, height, err := w.platformGetWindowSize()
 	if err != nil {
 		return err
 	}
 	w.platform.width, w.platform.height = width, height
 
+	return nil
+}
+
+// setIconFromExecutable sets the icon embedded in the running executable as the
+// window icon, so an executable carrying an icon shows it as the window icon
+// without calling SetWindowIcon, matching typical Windows applications.
+//
+// Extracting the icon is best-effort: when the executable embeds no icon (such
+// as a plain "go build" binary) or extraction fails, the window keeps the
+// generic class icon, and SetWindowIcon(nil) later reverts to that same icon.
+func (w *Window) setIconFromExecutable() error {
+	if microsoftgdk.IsXbox() {
+		return nil
+	}
+
+	cxIcon, err := _GetSystemMetrics(_SM_CXICON)
+	if err != nil {
+		return err
+	}
+	cyIcon, err := _GetSystemMetrics(_SM_CYICON)
+	if err != nil {
+		return err
+	}
+	bigIcon, err := exeicon.Extract(int(cxIcon), int(cyIcon))
+	if err != nil {
+		slog.Error("glfw: extracting the large window icon from the executable failed", "error", err)
+	}
+
+	cxSmIcon, err := _GetSystemMetrics(_SM_CXSMICON)
+	if err != nil {
+		return err
+	}
+	cySmIcon, err := _GetSystemMetrics(_SM_CYSMICON)
+	if err != nil {
+		return err
+	}
+	smallIcon, err := exeicon.Extract(int(cxSmIcon), int(cySmIcon))
+	if err != nil {
+		slog.Error("glfw: extracting the small window icon from the executable failed", "error", err)
+	}
+
+	if bigIcon == 0 && smallIcon == 0 {
+		return nil
+	}
+
+	// Either handle may be zero; WM_SETICON with a zero handle leaves the class
+	// icon in place for that size, and Windows derives the small icon from the
+	// large one when the small handle is zero.
+	_SendMessageW(w.platform.handle, _WM_SETICON, _ICON_BIG, _LPARAM(bigIcon))
+	_SendMessageW(w.platform.handle, _WM_SETICON, _ICON_SMALL, _LPARAM(smallIcon))
+	w.platform.bigIcon = _HICON(bigIcon)
+	w.platform.smallIcon = _HICON(smallIcon)
 	return nil
 }
 
@@ -1428,6 +1498,16 @@ func unregisterWindowClassWin32() error {
 }
 
 func (w *Window) platformCreateWindow(wndconfig *wndconfig, ctxconfig *ctxconfig, fbconfig *fbconfig) error {
+	// A window that manages its own presentation (no OpenGL context) and is not transparent can be
+	// created without a redirection surface, so DWM does not stretch stale content while the window
+	// is being resized (#3477). This requires DirectComposition to present the content; the graphics
+	// driver detects WS_EX_NOREDIRECTIONBITMAP and uses DirectComposition accordingly. Whether
+	// DirectComposition actually works can only be determined by the driver (#3489), so this relies
+	// on Win32NoRedirectionBitmap rather than probing here.
+	if ctxconfig.client == NoAPI && !fbconfig.transparent && winver.IsWindows10OrGreater() && wndconfig.noRedirectionBitmap {
+		w.platform.noRedirectionBitmap = true
+	}
+
 	if err := w.createNativeWindow(wndconfig, fbconfig); err != nil {
 		return err
 	}
@@ -1571,6 +1651,7 @@ func (w *Window) platformSetWindowIcon(images []*Image) error {
 		}
 		smallIcon, err = createIcon(smallImage, 0, 0, false)
 		if err != nil {
+			_ = _DestroyIcon(bigIcon)
 			return err
 		}
 	} else {
@@ -1589,17 +1670,8 @@ func (w *Window) platformSetWindowIcon(images []*Image) error {
 	_SendMessageW(w.platform.handle, _WM_SETICON, _ICON_BIG, _LPARAM(bigIcon))
 	_SendMessageW(w.platform.handle, _WM_SETICON, _ICON_SMALL, _LPARAM(smallIcon))
 
-	if w.platform.bigIcon != 0 {
-		if err := _DestroyIcon(w.platform.bigIcon); err != nil {
-			return err
-		}
-	}
-
-	if w.platform.smallIcon != 0 {
-		if err := _DestroyIcon(w.platform.smallIcon); err != nil {
-			return err
-		}
-	}
+	oldBigIcon := w.platform.bigIcon
+	oldSmallIcon := w.platform.smallIcon
 
 	if len(images) > 0 {
 		w.platform.bigIcon = bigIcon
@@ -1608,7 +1680,15 @@ func (w *Window) platformSetWindowIcon(images []*Image) error {
 		w.platform.bigIcon = 0
 		w.platform.smallIcon = 0
 	}
-	return nil
+
+	var err error
+	if oldBigIcon != 0 {
+		err = errors.Join(err, _DestroyIcon(oldBigIcon))
+	}
+	if oldSmallIcon != 0 {
+		err = errors.Join(err, _DestroyIcon(oldSmallIcon))
+	}
+	return err
 }
 
 func (w *Window) platformGetWindowPos() (xpos, ypos int, err error) {
@@ -2340,7 +2420,7 @@ func (w *Window) platformSetCursorMode(mode int) error {
 
 func platformGetScancodeName(scancode int) (string, error) {
 	if scancode < 0 || scancode > (_KF_EXTENDED|0xff) {
-		return "", fmt.Errorf("glwfwin: invalid scancode %d: %w", scancode, InvalidValue)
+		return "", fmt.Errorf("glfw: invalid scancode %d: %w", scancode, InvalidValue)
 	}
 	key := _glfw.platformWindow.keycodes[scancode]
 	if key == KeyUnknown {
@@ -2351,6 +2431,31 @@ func platformGetScancodeName(scancode int) (string, error) {
 
 func platformGetKeyScancode(key Key) int {
 	return _glfw.platformWindow.scancodes[key]
+}
+
+func (c *Cursor) platformCreateCursor(img *image.NRGBA, xhot, yhot int) error {
+	if microsoftgdk.IsXbox() {
+		return nil
+	}
+
+	b := img.Bounds()
+	w := b.Dx()
+	h := b.Dy()
+
+	// Repack into a tight RGBA buffer: createIcon expects contiguous pixels
+	// and a non-zero image origin or non-trivial stride would confuse it.
+	pixels := make([]byte, w*h*4)
+	for y := range h {
+		src := img.PixOffset(b.Min.X, b.Min.Y+y)
+		copy(pixels[y*w*4:(y+1)*w*4], img.Pix[src:src+w*4])
+	}
+
+	handle, err := createIcon(&Image{Width: w, Height: h, Pixels: pixels}, xhot, yhot, false)
+	if err != nil {
+		return err
+	}
+	c.platform.handle = _HCURSOR(handle)
+	return nil
 }
 
 func (c *Cursor) platformCreateStandardCursor(shape StandardCursor) error {

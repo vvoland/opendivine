@@ -18,24 +18,46 @@ import (
 	"io"
 
 	"github.com/ebitengine/oto/v3"
+
+	"github.com/hajimehoshi/ebiten/v2/audio/internal/vmaudio"
 )
 
-func newContext(sampleRate int) (context, chan struct{}, error) {
+func newContext(sampleRate int, vmGuest bool) (context, chan struct{}, error) {
+	// A virtualization guest plays no audio of its own: its audio goes to a virtual device the host
+	// reads, instead of a real device.
+	if vmGuest {
+		c := vmaudio.NewContext(sampleRate)
+		// The virtual device needs no asynchronous initialization and is ready from the start.
+		ready := make(chan struct{})
+		close(ready)
+		return &vmaudioContext{c}, ready, nil
+	}
+
 	ctx, ready, err := oto.NewContext(&oto.NewContextOptions{
 		SampleRate:   sampleRate,
 		ChannelCount: channelCount,
 		Format:       oto.FormatFloat32LE,
 	})
 	err = addErrorInfo(err)
-	return &contextProxy{ctx}, ready, err
+	return &otoContext{ctx}, ready, err
 }
 
-// contextProxy is a proxy between otoContext and context.
-type contextProxy struct {
+// otoContext is a proxy between oto.Context and context.
+type otoContext struct {
 	*oto.Context
 }
 
 // NewPlayer implements context.
-func (c *contextProxy) NewPlayer(r io.Reader) player {
+func (c *otoContext) NewPlayer(r io.Reader) player {
+	return c.Context.NewPlayer(r)
+}
+
+// vmaudioContext is a proxy between vmaudio.Context and context.
+type vmaudioContext struct {
+	*vmaudio.Context
+}
+
+// NewPlayer implements context.
+func (c *vmaudioContext) NewPlayer(r io.Reader) player {
 	return c.Context.NewPlayer(r)
 }

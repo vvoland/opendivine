@@ -99,7 +99,6 @@ type compileContext struct {
 	version     GLSLVersion
 	structNames map[string]string
 	structTypes []shaderir.Type
-	unit        shaderir.Unit
 }
 
 func (c *compileContext) structName(p *shaderir.Program, t *shaderir.Type) string {
@@ -122,7 +121,6 @@ func Compile(p *shaderir.Program, version GLSLVersion) (vertexShader, fragmentSh
 	c := &compileContext{
 		version:     version,
 		structNames: map[string]string{},
-		unit:        p.Unit,
 	}
 
 	// Vertex func
@@ -153,7 +151,6 @@ func Compile(p *shaderir.Program, version GLSLVersion) (vertexShader, fragmentSh
 			// When a vertex entry point is not defined, allow to put all the functions. This is useful for testing.
 			funcs = make([]*shaderir.Func, 0, len(p.Funcs))
 			for _, f := range p.Funcs {
-				f := f
 				funcs = append(funcs, &f)
 			}
 		}
@@ -239,7 +236,6 @@ func Compile(p *shaderir.Program, version GLSLVersion) (vertexShader, fragmentSh
 			// When a fragment entry point is not defined, allow to put all the functions. This is useful for testing.
 			funcs = make([]*shaderir.Func, 0, len(p.Funcs))
 			for _, f := range p.Funcs {
-				f := f
 				funcs = append(funcs, &f)
 			}
 		}
@@ -489,7 +485,7 @@ func (c *compileContext) block(p *shaderir.Program, topBlock, block *shaderir.Bl
 		case shaderir.Unary:
 			var op string
 			switch e.Op {
-			case shaderir.Add, shaderir.Sub, shaderir.NotOp:
+			case shaderir.Add, shaderir.Sub, shaderir.NotOp, shaderir.ComplementOp:
 				op = opString(e.Op)
 			default:
 				op = fmt.Sprintf("?(unexpected op: %d)", e.Op)
@@ -499,6 +495,9 @@ func (c *compileContext) block(p *shaderir.Program, topBlock, block *shaderir.Bl
 			if e.Op == shaderir.ModOp && c.version == GLSLVersionDefault {
 				// '%' is not defined.
 				return fmt.Sprintf("modInt((%s), (%s))", expr(&e.Exprs[0]), expr(&e.Exprs[1]))
+			}
+			if e.Op == shaderir.AndNot {
+				return fmt.Sprintf("(%s) & ~(%s)", expr(&e.Exprs[0]), expr(&e.Exprs[1]))
 			}
 			return fmt.Sprintf("(%s) %s (%s)", expr(&e.Exprs[0]), opString(e.Op), expr(&e.Exprs[1]))
 		case shaderir.Selection:
@@ -510,8 +509,9 @@ func (c *compileContext) block(p *shaderir.Program, topBlock, block *shaderir.Bl
 			}
 			callee := e.Exprs[0]
 			if callee.Type == shaderir.BuiltinFuncExpr {
-				if c.unit == shaderir.Pixels && callee.BuiltinFunc == shaderir.TexelAt {
-					return fmt.Sprintf("%s(%s, ivec2(%s), 0)", expr(&callee), args[0], args[1])
+				if callee.BuiltinFunc == shaderir.TexelAt {
+					// Floor the position so that a negative position is out of the texture.
+					return fmt.Sprintf("%s(%s, ivec2(floor(%s)), 0)", expr(&callee), args[0], args[1])
 				}
 				if callee.BuiltinFunc == shaderir.Min || callee.BuiltinFunc == shaderir.Max {
 					result := args[0]

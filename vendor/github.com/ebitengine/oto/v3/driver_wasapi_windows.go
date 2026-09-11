@@ -30,18 +30,25 @@ import (
 
 type comThread struct {
 	funcCh chan func()
+	done   chan struct{}
+
+	stopped bool
+	m       sync.Mutex
 }
 
 func newCOMThread() (*comThread, error) {
 	funcCh := make(chan func())
 	errCh := make(chan error)
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		runtime.LockOSThread()
 		defer runtime.UnlockOSThread()
 
 		// S_FALSE is returned when CoInitializeEx is nested. This is a successful case.
 		if err := windows.CoInitializeEx(0, windows.COINIT_MULTITHREADED); err != nil && !errors.Is(err, syscall.Errno(windows.S_FALSE)) {
 			errCh <- err
+			return
 		}
 		// CoUninitialize should be called even when CoInitializeEx returns S_FALSE.
 		defer windows.CoUninitialize()
@@ -59,16 +66,38 @@ func newCOMThread() (*comThread, error) {
 
 	return &comThread{
 		funcCh: funcCh,
+		done:   done,
 	}, nil
 }
 
+// Run calls f on the COM thread and waits for it. f is not called after Stop.
 func (c *comThread) Run(f func()) {
+	c.m.Lock()
+	defer c.m.Unlock()
+
+	if c.stopped {
+		return
+	}
+
 	ch := make(chan struct{})
 	c.funcCh <- func() {
 		f()
 		close(ch)
 	}
 	<-ch
+}
+
+// Stop terminates the COM thread. Stop must not be called on the COM thread.
+func (c *comThread) Stop() {
+	c.m.Lock()
+	defer c.m.Unlock()
+
+	if c.stopped {
+		return
+	}
+	c.stopped = true
+	close(c.funcCh)
+	<-c.done
 }
 
 type wasapiContext struct {
@@ -88,6 +117,7 @@ type wasapiContext struct {
 	renderClient     *_IAudioRenderClient
 	currentDeviceID  string
 	enumerator       *_IMMDeviceEnumerator
+	oomRetryCount    int
 
 	buf []float32
 
@@ -97,6 +127,21 @@ type wasapiContext struct {
 var (
 	errDeviceSwitched     = errors.New("oto: device switched")
 	errFormatNotSupported = errors.New("oto: the specified format is not supported (there is the closest format instead)")
+)
+
+const (
+	wasapiOOMRetryLimit = 3
+
+	// wasapiRestartRetryLimit caps the transient-error re-acquisition attempts
+	// before the error is surfaced. With the backoff intervals below, this is
+	// roughly ten seconds of continuous outage.
+	wasapiRestartRetryLimit = 24
+
+	// wasapiReacquireMinInterval and wasapiReacquireMaxInterval bound the backoff
+	// between device re-acquisition attempts, each a full COM round trip. Mux
+	// draining continues at real time regardless.
+	wasapiReacquireMinInterval = 50 * time.Millisecond
+	wasapiReacquireMaxInterval = 500 * time.Millisecond
 )
 
 func newWASAPIContext(sampleRate, channelCount int, mux *mux.Mux, bufferSizeInBytes int) (context *wasapiContext, ferr error) {
@@ -114,15 +159,16 @@ func newWASAPIContext(sampleRate, channelCount int, mux *mux.Mux, bufferSizeInBy
 		suspendedCond:     sync.NewCond(&sync.Mutex{}),
 	}
 
+	defer func() {
+		if ferr != nil {
+			c.close()
+		}
+	}()
+
 	ev, err := windows.CreateEventEx(nil, nil, 0, windows.EVENT_ALL_ACCESS)
 	if err != nil {
 		return nil, err
 	}
-	defer func() {
-		if ferr != nil {
-			windows.CloseHandle(ev)
-		}
-	}()
 	c.sampleReadyEvent = ev
 
 	if err := c.start(); err != nil {
@@ -164,48 +210,98 @@ func (c *wasapiContext) isDeviceSwitched() (bool, error) {
 }
 
 func (c *wasapiContext) start() error {
-	var cerr error
-	c.comThread.Run(func() {
-		if err := c.startOnCOMThread(); err != nil {
-			cerr = err
-			return
-		}
-	})
-	if cerr != nil {
-		return cerr
+	if err := c.initialize(); err != nil {
+		return err
 	}
-
-	go func() {
-		if err := c.loop(); err != nil {
-			if !errors.Is(err, _AUDCLNT_E_DEVICE_INVALIDATED) && !errors.Is(err, _AUDCLNT_E_RESOURCES_INVALIDATED) && !errors.Is(err, errDeviceSwitched) {
-				c.err.TryStore(err)
-				return
-			}
-
-			if err := c.restart(); err != nil {
-				c.err.TryStore(err)
-				return
-			}
-		}
-	}()
-
+	go c.run()
 	return nil
 }
 
-func (c *wasapiContext) startOnCOMThread() (ferr error) {
-	if c.enumerator == nil {
-		e, err := _CoCreateInstance(&uuidMMDeviceEnumerator, nil, uint32(_CLSCTX_ALL), &uuidIMMDeviceEnumerator)
-		if err != nil {
-			return err
+func (c *wasapiContext) initialize() error {
+	var cerr error
+	c.comThread.Run(func() {
+		cerr = c.startOnCOMThread()
+	})
+	return cerr
+}
+
+func (c *wasapiContext) run() {
+	// This goroutine owns the resources across all recovery attempts. The render
+	// loop has returned before cleanup can close the event or release interfaces.
+	defer c.close()
+
+	for {
+		err := c.loop()
+		c.comThread.Run(c.releaseOnCOMThread)
+		if err == nil {
+			return
 		}
-		c.enumerator = (*_IMMDeviceEnumerator)(e)
-		defer func() {
-			if ferr != nil {
-				c.enumerator.Release()
-				c.enumerator = nil
+		// E_OUTOFMEMORY from IAudioRenderClient::GetBuffer has been observed on Xbox.
+		// The counter is reset after a successful buffer write, so this cap applies
+		// to consecutive failures without intervening progress.
+		if errors.Is(err, _E_OUTOFMEMORY) {
+			if c.oomRetryCount >= wasapiOOMRetryLimit {
+				c.err.Join(err)
+				return
 			}
-		}()
+			c.oomRetryCount++
+		} else if !errors.Is(err, _AUDCLNT_E_DEVICE_INVALIDATED) && !errors.Is(err, _AUDCLNT_E_RESOURCES_INVALIDATED) && !errors.Is(err, errDeviceSwitched) && !errors.Is(err, _RPC_E_DISCONNECTED) {
+			c.err.Join(err)
+			return
+		}
+
+		if err := c.restart(); err != nil {
+			c.err.Join(err)
+			return
+		}
 	}
+}
+
+// close must be called outside the COM thread after rendering has ended.
+func (c *wasapiContext) close() {
+	c.comThread.Run(c.releaseOnCOMThread)
+	if c.sampleReadyEvent != 0 {
+		windows.CloseHandle(c.sampleReadyEvent)
+		c.sampleReadyEvent = 0
+	}
+	c.comThread.Stop()
+}
+
+func (c *wasapiContext) releaseOnCOMThread() {
+	if c.client != nil {
+		_, _ = c.client.Stop()
+	}
+	// The render service must be released on the thread that acquired it,
+	// before releasing the audio client that owns it.
+	if c.renderClient != nil {
+		c.renderClient.Release()
+		c.renderClient = nil
+	}
+	if c.client != nil {
+		c.client.Release()
+		c.client = nil
+	}
+	if c.enumerator != nil {
+		c.enumerator.Release()
+		c.enumerator = nil
+	}
+}
+
+func (c *wasapiContext) startOnCOMThread() (ferr error) {
+	c.releaseOnCOMThread()
+	defer func() {
+		if ferr != nil {
+			c.releaseOnCOMThread()
+		}
+	}()
+
+	// Recreate the enumerator because it can become disconnected across
+	// suspend/resume or an audio service restart.
+	e, err := _CoCreateInstance(&uuidMMDeviceEnumerator, nil, uint32(_CLSCTX_ALL), &uuidIMMDeviceEnumerator)
+	if err != nil {
+		return err
+	}
+	c.enumerator = (*_IMMDeviceEnumerator)(e)
 
 	device, err := c.enumerator.GetDefaultAudioEndPoint(eRender, eConsole)
 	if err != nil {
@@ -221,11 +317,6 @@ func (c *wasapiContext) startOnCOMThread() (ferr error) {
 		return err
 	}
 	c.currentDeviceID = id
-
-	if c.client != nil {
-		c.client.Release()
-		c.client = nil
-	}
 
 	client, err := device.Activate(&uuidIAudioClient2, uint32(_CLSCTX_ALL), nil)
 	if err != nil {
@@ -278,8 +369,11 @@ func (c *wasapiContext) startOnCOMThread() (ferr error) {
 
 	// Even if the sample rate and/or the number of channels are not supported by the audio driver,
 	// AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM should convert the sample rate automatically (#215).
+	// AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY used together with
+	// AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM tells WASAPI to use a high-quality
+	// resampler. Without it, 44100 source played on a 48000 device sounds bad.
 	if err := c.client.Initialize(_AUDCLNT_SHAREMODE_SHARED,
-		_AUDCLNT_STREAMFLAGS_EVENTCALLBACK|_AUDCLNT_STREAMFLAGS_NOPERSIST|_AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
+		_AUDCLNT_STREAMFLAGS_EVENTCALLBACK|_AUDCLNT_STREAMFLAGS_NOPERSIST|_AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM|_AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
 		bufferSizeIn100ns, 0, f, nil); err != nil {
 		return err
 	}
@@ -289,11 +383,6 @@ func (c *wasapiContext) startOnCOMThread() (ferr error) {
 		return err
 	}
 	c.bufferFrames = frames
-
-	if c.renderClient != nil {
-		c.renderClient.Release()
-		c.renderClient = nil
-	}
 
 	renderClient, err := c.client.GetService(&uuidIAudioRenderClient)
 	if err != nil {
@@ -320,14 +409,12 @@ func (c *wasapiContext) loop() error {
 
 	// S_FALSE is returned when CoInitializeEx is nested. This is a successful case.
 	if err := windows.CoInitializeEx(0, windows.COINIT_MULTITHREADED); err != nil && !errors.Is(err, syscall.Errno(windows.S_FALSE)) {
-		_, _ = c.client.Stop()
 		return err
 	}
 	// CoUninitialize should be called even when CoInitializeEx returns S_FALSE.
 	defer windows.CoUninitialize()
 
 	if err := c.loopOnRenderThread(); err != nil {
-		_, _ = c.client.Stop()
 		return err
 	}
 
@@ -409,6 +496,7 @@ func (c *wasapiContext) writeOnRenderThread() error {
 	}
 
 	c.buf = c.buf[:0]
+	c.oomRetryCount = 0
 	return nil
 }
 
@@ -440,31 +528,66 @@ func (c *wasapiContext) Err() error {
 	return c.err.Load()
 }
 
+// isWASAPIDeviceTransientError reports whether err from (re)starting the client
+// indicates a temporarily unusable device rather than a permanent failure.
+func isWASAPIDeviceTransientError(err error) bool {
+	return errors.Is(err, errFormatNotSupported) ||
+		errors.Is(err, errDeviceNotFound) ||
+		errors.Is(err, _AUDCLNT_E_DEVICE_INVALIDATED) ||
+		errors.Is(err, _AUDCLNT_E_RESOURCES_INVALIDATED) ||
+		errors.Is(err, _RPC_E_DISCONNECTED)
+}
+
 func (c *wasapiContext) restart() error {
-	// Probably the driver is missing temporarily e.g. plugging out the headset.
-	// Recreate the device.
+	// The device is temporarily unusable, e.g. a headset was unplugged or the
+	// machine is resuming from sleep. Recreate it, retrying transient failures a
+	// bounded number of times.
+	//
+	// The mux is drained at ~real time so recovery resumes near the current
+	// position instead of replaying a backlog, while the re-acquisition itself
+	// backs off so a longer outage does not hammer the audio service.
+	var buf [4096]float32
+	framesPerRead := len(buf) / c.channelCount
+	perRead := time.Duration(float64(time.Second) * float64(framesPerRead) / float64(c.sampleRate))
 
-retry:
-	c.suspendedCond.L.Lock()
-	for c.suspended {
-		c.suspendedCond.Wait()
-	}
-	c.suspendedCond.L.Unlock()
+	reacquireInterval := wasapiReacquireMinInterval
+	var nextReacquire time.Time // zero value: attempt immediately
+	var retryCount int
 
-	if err := c.start(); err != nil {
-		// When a device is switched, the new device might not support the desired format,
-		// or all the audio devices might be disconnected.
-		// Instead of aborting this context, let's wait for the next device switch.
-		if !errors.Is(err, errFormatNotSupported) && !errors.Is(err, errDeviceNotFound) {
-			return err
+	for {
+		// Pause retrying entirely while suspended, and reset the retry count on
+		// resume: a long suspend must not make the next resume give up
+		// immediately.
+		c.suspendedCond.L.Lock()
+		var wasSuspended bool
+		for c.suspended {
+			wasSuspended = true
+			c.suspendedCond.Wait()
+		}
+		c.suspendedCond.L.Unlock()
+		if wasSuspended {
+			reacquireInterval = wasapiReacquireMinInterval
+			nextReacquire = time.Time{}
+			retryCount = 0
 		}
 
-		// Just read the buffer and discard it. Then, retry to search the device.
-		var buf32 [4096]float32
-		sleep := time.Duration(float64(time.Second) * float64(len(buf32)) / float64(c.channelCount) / float64(c.sampleRate))
-		c.mux.ReadFloat32s(buf32[:])
-		time.Sleep(sleep)
-		goto retry
+		if now := time.Now(); !now.Before(nextReacquire) {
+			err := c.initialize()
+			if err == nil {
+				return nil
+			}
+			if !isWASAPIDeviceTransientError(err) {
+				return err
+			}
+			retryCount++
+			if retryCount >= wasapiRestartRetryLimit {
+				return err
+			}
+			nextReacquire = time.Now().Add(reacquireInterval)
+			reacquireInterval = min(reacquireInterval*2, wasapiReacquireMaxInterval)
+		}
+
+		c.mux.ReadFloat32s(buf[:framesPerRead*c.channelCount])
+		time.Sleep(perRead)
 	}
-	return nil
 }

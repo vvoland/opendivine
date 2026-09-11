@@ -19,10 +19,13 @@ package ui
 //
 // #import <UIKit/UIKit.h>
 //
-// static void displayInfoOnMainThread(float* width, float* height, float* scale, UIView* view) {
+// #cgo noescape displayInfoOnMainThread
+// #cgo nocallback displayInfoOnMainThread
+// static void displayInfoOnMainThread(float* width, float* height, float* scale, uintptr_t viewPtr) {
 //   *width = 0;
 //   *height = 0;
 //   *scale = 1;
+//   UIView* view = (__bridge UIView*)(void*)viewPtr;
 //   UIWindow* window = view.window;
 //   if (!window) {
 //     return;
@@ -36,42 +39,22 @@ package ui
 //   *height = bounds.size.height;
 //   *scale = scene.screen.nativeScale;
 // }
-//
-// #cgo noescape displayInfo
-// #cgo nocallback displayInfo
-// static void displayInfo(float* width, float* height, float* scale, uintptr_t viewPtr) {
-//   *width = 0;
-//   *height = 0;
-//   *scale = 1;
-//   if (!viewPtr) {
-//     return;
-//   }
-//   UIView* view = (__bridge UIView*)(void*)viewPtr;
-//   if ([NSThread isMainThread]) {
-//     displayInfoOnMainThread(width, height, scale, view);
-//     return;
-//   }
-//   __block float w, h, s;
-//   dispatch_sync(dispatch_get_main_queue(), ^{
-//     displayInfoOnMainThread(&w, &h, &s, view);
-//   });
-//   *width = w;
-//   *height = h;
-//   *scale = s;
-// }
 import "C"
 
 import (
 	"errors"
 	"fmt"
 
+	"github.com/ebitengine/purego/objc"
+
+	"github.com/hajimehoshi/ebiten/v2/internal/color"
 	"github.com/hajimehoshi/ebiten/v2/internal/graphicsdriver"
 	"github.com/hajimehoshi/ebiten/v2/internal/graphicsdriver/metal"
 	"github.com/hajimehoshi/ebiten/v2/internal/graphicsdriver/opengl"
 )
 
 type graphicsDriverCreatorImpl struct {
-	colorSpace graphicsdriver.ColorSpace
+	colorSpace color.ColorSpace
 }
 
 func (g *graphicsDriverCreatorImpl) newAuto() (graphicsdriver.Graphics, GraphicsLibrary, error) {
@@ -81,7 +64,7 @@ func (g *graphicsDriverCreatorImpl) newAuto() (graphicsdriver.Graphics, Graphics
 	}
 	o, err2 := g.newOpenGL()
 	if err2 == nil {
-		return o, GraphicsLibraryMetal, nil
+		return o, GraphicsLibraryOpenGL, nil
 	}
 	return nil, GraphicsLibraryUnknown, fmt.Errorf("ui: failed to choose graphics drivers: Metal: %v, OpenGL: %v", err1, err2)
 }
@@ -102,19 +85,28 @@ func (*graphicsDriverCreatorImpl) newPlayStation5() (graphicsdriver.Graphics, er
 	return nil, errors.New("ui: PlayStation 5 is not supported in this environment")
 }
 
+// SetUIView sets the view the game is rendered into. It must be called
+// whichever graphics library is used.
 func (u *UserInterface) SetUIView(uiview uintptr) error {
 	u.uiView.Store(uiview)
+	u.refreshDisplayInfo()
 	select {
 	case err := <-u.errCh:
 		return err
 	case <-u.graphicsLibraryInitCh:
 	}
 
-	// This function should be called only when the graphics library is Metal.
+	// Only the Metal driver needs the view. The OpenGL driver renders through
+	// the context the view owns.
 	if g, ok := u.graphicsDriver.(interface{ SetUIView(uintptr) }); ok {
 		g.SetUIView(uiview)
 	}
 	return nil
+}
+
+// UIView returns the UIView pointer set by [UserInterface.SetUIView], or 0.
+func (u *UserInterface) UIView() uintptr {
+	return u.uiView.Load()
 }
 
 func (u *UserInterface) IsGL() (bool, error) {
@@ -135,16 +127,27 @@ func dipFromNativePixels(x float64, scale float64) float64 {
 	return x
 }
 
-func (u *UserInterface) displayInfo() (int, int, float64, bool) {
+// refreshDisplayInfo records the display info for displayInfo to serve on any
+// thread. refreshDisplayInfo must be called on the main thread.
+func (u *UserInterface) refreshDisplayInfo() {
 	view := u.uiView.Load()
 	if view == 0 {
-		return 0, 0, 1, false
+		return
 	}
 
 	var cWidth, cHeight, cScale C.float
-	C.displayInfo(&cWidth, &cHeight, &cScale, C.uintptr_t(view))
-	scale := float64(cScale)
-	width := int(dipFromNativePixels(float64(cWidth), scale))
-	height := int(dipFromNativePixels(float64(cHeight), scale))
-	return width, height, scale, true
+	C.displayInfoOnMainThread(&cWidth, &cHeight, &cScale, C.uintptr_t(view))
+	theDisplayInfo.Store(&displayInfoValues{
+		width:  float64(cWidth),
+		height: float64(cHeight),
+		scale:  float64(cScale),
+	})
+}
+
+func (u *UserInterface) RunOnMainThread(f func()) {
+	b := objc.NewBlock(func(_ objc.Block) {
+		f()
+	})
+	defer b.Release()
+	dispatchSync(dispatchMainQ, b)
 }

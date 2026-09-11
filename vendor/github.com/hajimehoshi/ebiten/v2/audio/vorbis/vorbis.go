@@ -113,7 +113,7 @@ type i16Stream struct {
 
 func (s *i16Stream) Read(b []byte) (int, error) {
 	if s.i16Reader == nil {
-		s.i16Reader = newInt16BytesReaderFromFloat32Reader(s.vorbisReader)
+		s.i16Reader = newInt16BytesReaderFromFloat32Reader(s.vorbisReader, s.vorbisReader.Channels())
 	}
 
 	l := int64(len(b))
@@ -135,7 +135,7 @@ func (s *i16Stream) Seek(offset int64, whence int) (int64, error) {
 		return 0, fmt.Errorf("vorbis: the source must be io.Seeker but not: %w", errors.ErrUnsupported)
 	}
 
-	next := int64(0)
+	var next int64
 	switch whence {
 	case io.SeekStart:
 		next = offset
@@ -143,14 +143,20 @@ func (s *i16Stream) Seek(offset int64, whence int) (int64, error) {
 		next = int64(s.posInBytes) + offset
 	case io.SeekEnd:
 		next = int64(s.totalBytes()) + offset
+	default:
+		return 0, fmt.Errorf("vorbis: whence must be io.SeekStart, io.SeekCurrent, or io.SeekEnd but was %d", whence)
+	}
+	if next < 0 {
+		return 0, fmt.Errorf("vorbis: position must be >= 0 but was %d", next)
 	}
 	sampleSize := int64(s.vorbisReader.Channels()) * bitDepthInBytesInt16
-	s.posInBytes = next / sampleSize * sampleSize
-	if err := s.vorbisReader.SetPosition(next / sampleSize); err != nil {
+	pos := next / sampleSize * sampleSize
+	if err := s.vorbisReader.SetPosition(pos / sampleSize); err != nil {
 		return 0, err
 	}
+	s.posInBytes = pos
 	s.i16Reader = nil
-	return next, nil
+	return s.posInBytes, nil
 }
 
 func (s *i16Stream) totalBytes() int64 {

@@ -19,9 +19,12 @@ import (
 	"fmt"
 	"runtime"
 	"syscall"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 
+	"github.com/hajimehoshi/ebiten/v2/internal/color"
+	"github.com/hajimehoshi/ebiten/v2/internal/colormode"
 	"github.com/hajimehoshi/ebiten/v2/internal/glfw"
 	"github.com/hajimehoshi/ebiten/v2/internal/graphicsdriver"
 	"github.com/hajimehoshi/ebiten/v2/internal/graphicsdriver/directx"
@@ -34,13 +37,13 @@ func (u *UserInterface) initializePlatform() error {
 	return nil
 }
 
-func (u *UserInterface) setApplePressAndHoldEnabled(enabled bool) {
-	// Do nothings.
+func (u *glfwBackend) setApplePressAndHoldEnabled(enabled bool) {
+	// Do nothing.
 }
 
 type graphicsDriverCreatorImpl struct {
 	transparent bool
-	colorSpace  graphicsdriver.ColorSpace
+	colorSpace  color.ColorSpace
 }
 
 func (g *graphicsDriverCreatorImpl) newAuto() (graphicsdriver.Graphics, GraphicsLibrary, error) {
@@ -97,6 +100,22 @@ func (*graphicsDriverCreatorImpl) newPlayStation5() (graphicsdriver.Graphics, er
 	return nil, errors.New("ui: PlayStation 5 is not supported in this environment")
 }
 
+// setOpenGLWindowHints sets the GLFW hints to create a window with an OpenGL context.
+//
+// setOpenGLWindowHints must be called from the main thread.
+func (u *glfwBackend) setOpenGLWindowHints() error {
+	if err := glfw.WindowHint(glfw.ClientAPI, glfw.OpenGLAPI); err != nil {
+		return err
+	}
+	if err := glfw.WindowHint(glfw.ContextVersionMajor, 3); err != nil {
+		return err
+	}
+	if err := glfw.WindowHint(glfw.ContextVersionMinor, 2); err != nil {
+		return err
+	}
+	return nil
+}
+
 // glfwMonitorSizeInGLFWPixels must be called from the main thread.
 func glfwMonitorSizeInGLFWPixels(m *glfw.Monitor) (int, int, error) {
 	vm, err := m.GetVideoMode()
@@ -114,7 +133,7 @@ func dipToGLFWPixel(x float64, deviceScaleFactor float64) float64 {
 	return x * deviceScaleFactor
 }
 
-func (u *UserInterface) adjustWindowPosition(x, y int, monitor *Monitor) (int, int, error) {
+func (u *glfwBackend) adjustWindowPosition(x, y int, monitor *Monitor) (int, int, error) {
 	if microsoftgdk.IsXbox() {
 		return x, y, nil
 	}
@@ -200,36 +219,37 @@ func monitorFromWin32Window(w windows.HWND) *Monitor {
 	return nil
 }
 
-func (u *UserInterface) nativeWindow() (uintptr, error) {
+func (u *glfwBackend) nativeWindow() (uintptr, error) {
 	w, err := u.window.GetWin32Window()
 	return uintptr(w), err
 }
 
-func (u *UserInterface) isNativeFullscreen() (bool, error) {
+func (u *glfwBackend) isWindowOccluded() (bool, error) {
+	// An invisible screen is detected by the DirectX driver and paced by the frame loop instead.
+	return false, errors.ErrUnsupported
+}
+
+func (u *glfwBackend) isNativeFullscreen() (bool, error) {
 	return false, nil
 }
 
-func (u *UserInterface) isNativeFullscreenAvailable() bool {
+func (u *glfwBackend) isNativeFullscreenAvailable() bool {
 	return false
 }
 
-func (u *UserInterface) setNativeFullscreen(fullscreen bool) error {
+func (u *glfwBackend) setNativeFullscreen(fullscreen bool) error {
 	panic(fmt.Sprintf("ui: setNativeFullscreen is not implemented in this environment: %s", runtime.GOOS))
 }
 
-func (u *UserInterface) adjustViewSizeAfterFullscreen() error {
+func (u *glfwBackend) setWindowResizingModeForOS(mode WindowResizingMode) error {
 	return nil
 }
 
-func (u *UserInterface) setWindowResizingModeForOS(mode WindowResizingMode) error {
+func (u *glfwBackend) initializeWindowAfterCreation(w *glfw.Window) error {
 	return nil
 }
 
-func initializeWindowAfterCreation(w *glfw.Window) error {
-	return nil
-}
-
-func (u *UserInterface) skipTaskbar() error {
+func (u *glfwBackend) skipTaskbar() error {
 	// S_FALSE is returned when CoInitializeEx is nested. This is a successful case.
 	if err := windows.CoInitializeEx(0, windows.COINIT_MULTITHREADED); err != nil && !errors.Is(err, syscall.Errno(windows.S_FALSE)) {
 		return err
@@ -256,11 +276,11 @@ func (u *UserInterface) skipTaskbar() error {
 	return nil
 }
 
-func (u *UserInterface) setDocumentEdited(edited bool) error {
+func (u *glfwBackend) setDocumentEdited(edited bool) error {
 	return nil
 }
 
-func (u *UserInterface) afterWindowCreation() error {
+func (u *glfwBackend) afterWindowCreation() error {
 	if microsoftgdk.IsXbox() {
 		return nil
 	}
@@ -281,6 +301,16 @@ func (u *UserInterface) afterWindowCreation() error {
 // RestoreIMMContextOnMainThread is called from the main thread.
 // The textinput package invokes RestoreIMMContextOnMainThread to enable IME inputting.
 func (u *UserInterface) RestoreIMMContextOnMainThread() error {
+	b, ok := u.runningBackend().(*glfwBackend)
+	if !ok {
+		return nil
+	}
+	return b.RestoreIMMContextOnMainThread()
+}
+
+// RestoreIMMContextOnMainThread is called from the main thread.
+// The textinput package invokes RestoreIMMContextOnMainThread to enable IME inputting.
+func (u *glfwBackend) RestoreIMMContextOnMainThread() error {
 	w, err := u.window.GetWin32Window()
 	if err != nil {
 		return err
@@ -301,4 +331,44 @@ func init() {
 	// An error is ignored. The application is still valid even if a higher resolution timer is not available.
 	// TODO: This might not be necessary from Go 1.23.
 	_ = windows.TimeBeginPeriod(1)
+}
+
+// setWindowColorModeImpl must be called from the main thread.
+func (u *glfwBackend) setWindowColorModeImpl(mode colormode.ColorMode) error {
+	if microsoftgdk.IsXbox() {
+		return nil
+	}
+
+	w, err := u.window.GetWin32Window()
+	if err != nil {
+		return err
+	}
+
+	var useImmersiveDarkMode uint32
+	if mode == colormode.Dark {
+		useImmersiveDarkMode = 1
+	}
+	if err := _DwmSetWindowAttribute(w, _DWMWA_USE_IMMERSIVE_DARK_MODE, unsafe.Pointer(&useImmersiveDarkMode), uint32(unsafe.Sizeof(useImmersiveDarkMode))); err != nil {
+		// DwmSetWindowAttribute can fail if the Windows version is old.
+		// Ignore this error.
+		return nil
+	}
+
+	return nil
+}
+
+func (u *glfwBackend) syncModKeysFromOS() {}
+
+// syncLockKeysFromOS updates the lock key state to the current OS state.
+// Must be called on the main thread.
+func (u *glfwBackend) syncLockKeysFromOS() {
+	if microsoftgdk.IsXbox() {
+		return
+	}
+
+	// The low-order bit of GetKeyState is the toggle state.
+	caps := _GetKeyState(_VK_CAPITAL)&1 != 0
+	num := _GetKeyState(_VK_NUMLOCK)&1 != 0
+
+	u.input.setLockKeys(NewLockKeyStateFromBool(caps), NewLockKeyStateFromBool(num))
 }

@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-ARG GOLANG_IMAGE=golang:1.26-alpine
+ARG GOLANG_IMAGE=golang:1.27-alpine
 ARG PYTHON_IMAGE=python:3.14-alpine
 ARG DISTROLESS_STATIC_IMAGE=gcr.io/distroless/static-debian13:nonroot
 ARG UID=1000

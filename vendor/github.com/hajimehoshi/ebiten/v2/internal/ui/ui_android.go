@@ -101,12 +101,13 @@ import (
 
 	"github.com/ebitengine/gomobile/app"
 
+	"github.com/hajimehoshi/ebiten/v2/internal/color"
 	"github.com/hajimehoshi/ebiten/v2/internal/graphicsdriver"
 	"github.com/hajimehoshi/ebiten/v2/internal/graphicsdriver/opengl"
 )
 
 type graphicsDriverCreatorImpl struct {
-	colorSpace graphicsdriver.ColorSpace
+	colorSpace color.ColorSpace
 }
 
 func (g *graphicsDriverCreatorImpl) newAuto() (graphicsdriver.Graphics, GraphicsLibrary, error) {
@@ -138,7 +139,9 @@ func dipFromNativePixels(x float64, scale float64) float64 {
 	return x / scale
 }
 
-func (u *UserInterface) displayInfo() (int, int, float64, bool) {
+// refreshDisplayInfo records the display info for displayInfo to serve on any
+// thread. refreshDisplayInfo must be called on the main thread.
+func (u *UserInterface) refreshDisplayInfo() {
 	var cWidth, cHeight C.int
 	var cScale C.float
 	if err := app.RunOnJVM(func(vm, env, ctx uintptr) error {
@@ -147,10 +150,15 @@ func (u *UserInterface) displayInfo() (int, int, float64, bool) {
 	}); err != nil {
 		// JVM is not ready yet.
 		// TODO: Fix gomobile to detect the error type for this case.
-		return 0, 0, 1, false
+		return
 	}
-	scale := float64(cScale)
-	width := int(dipFromNativePixels(float64(cWidth), scale))
-	height := int(dipFromNativePixels(float64(cHeight), scale))
-	return width, height, scale, true
+	theDisplayInfo.Store(&displayInfoValues{
+		width:  float64(cWidth),
+		height: float64(cHeight),
+		scale:  float64(cScale),
+	})
+}
+
+func (u *UserInterface) RunOnMainThread(f func()) {
+	panic("ui: RunOnMainThread is not supported for this platform")
 }

@@ -15,35 +15,51 @@
 package oto
 
 import (
+	"sync"
+
 	"github.com/ebitengine/oto/v3/internal/mux"
 	"github.com/ebitengine/oto/v3/internal/oboe"
 )
 
 type context struct {
 	mux *mux.Mux
+
+	err atomicError
+
+	m sync.Mutex
 }
 
-func newContext(sampleRate int, channelCount int, format mux.Format, bufferSizeInBytes int) (*context, chan struct{}, error) {
+func newContext(sampleRate int, channelCount int, format mux.Format, bufferSizeInBytes int, _ string) (*context, chan struct{}, error) {
 	ready := make(chan struct{})
-	close(ready)
 
 	c := &context{
 		mux: mux.New(sampleRate, channelCount, format),
 	}
-	if err := oboe.Play(sampleRate, channelCount, c.mux.ReadFloat32s, bufferSizeInBytes); err != nil {
-		return nil, nil, err
-	}
+	go func() {
+		c.m.Lock()
+		defer c.m.Unlock()
+
+		if err := oboe.Play(sampleRate, channelCount, c.mux.ReadFloat32s, c.err.Join, bufferSizeInBytes); err != nil {
+			c.err.Join(err)
+			return
+		}
+		close(ready)
+	}()
 	return c, ready, nil
 }
 
 func (c *context) Suspend() error {
+	c.m.Lock()
+	defer c.m.Unlock()
 	return oboe.Suspend()
 }
 
 func (c *context) Resume() error {
+	c.m.Lock()
+	defer c.m.Unlock()
 	return oboe.Resume()
 }
 
 func (c *context) Err() error {
-	return nil
+	return c.err.Load()
 }

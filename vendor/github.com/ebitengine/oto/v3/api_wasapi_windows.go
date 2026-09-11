@@ -41,16 +41,17 @@ var (
 )
 
 const (
-	_AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM = 0x80000000
-	_AUDCLNT_STREAMFLAGS_EVENTCALLBACK  = 0x00040000
-	_AUDCLNT_STREAMFLAGS_NOPERSIST      = 0x00080000
-	_COINIT_APARTMENTTHREADED           = 0x2
-	_COINIT_MULTITHREADED               = 0
-	_REFTIMES_PER_SEC                   = 10000000
-	_SPEAKER_FRONT_CENTER               = 0x4
-	_SPEAKER_FRONT_LEFT                 = 0x1
-	_SPEAKER_FRONT_RIGHT                = 0x2
-	_WAVE_FORMAT_EXTENSIBLE             = 0xfffe
+	_AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM      = 0x80000000
+	_AUDCLNT_STREAMFLAGS_EVENTCALLBACK       = 0x00040000
+	_AUDCLNT_STREAMFLAGS_NOPERSIST           = 0x00080000
+	_AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY = 0x08000000
+	_COINIT_APARTMENTTHREADED                = 0x2
+	_COINIT_MULTITHREADED                    = 0
+	_REFTIMES_PER_SEC                        = 10000000
+	_SPEAKER_FRONT_CENTER                    = 0x4
+	_SPEAKER_FRONT_LEFT                      = 0x1
+	_SPEAKER_FRONT_RIGHT                     = 0x2
+	_WAVE_FORMAT_EXTENSIBLE                  = 0xfffe
 )
 
 var (
@@ -139,7 +140,8 @@ const (
 type _WIN32_ERR uint32
 
 const (
-	_E_NOTFOUND _WIN32_ERR = 0x80070490
+	_E_NOTFOUND    _WIN32_ERR = 0x80070490
+	_E_OUTOFMEMORY _WIN32_ERR = 0x8007000e
 )
 
 func isWin32Err(hresult uint32) bool {
@@ -150,8 +152,29 @@ func (e _WIN32_ERR) Error() string {
 	switch e {
 	case _E_NOTFOUND:
 		return "E_NOTFOUND"
+	case _E_OUTOFMEMORY:
+		return "E_OUTOFMEMORY"
 	default:
 		return fmt.Sprintf("HRESULT(%d)", e)
+	}
+}
+
+type _RPC_ERR uint32
+
+const (
+	_RPC_E_DISCONNECTED _RPC_ERR = 0x80010108
+)
+
+func isRPCErr(hresult uint32) bool {
+	return hresult&0xffff0000 == (1<<31)|(windows.FACILITY_RPC<<16)
+}
+
+func (e _RPC_ERR) Error() string {
+	switch e {
+	case _RPC_E_DISCONNECTED:
+		return "RPC_E_DISCONNECTED"
+	default:
+		return fmt.Sprintf("RPC_ERR(0x%08x)", uint32(e))
 	}
 }
 
@@ -163,7 +186,7 @@ type _AudioClientProperties struct {
 }
 
 type _PROPVARIANT struct {
-	// TODO: Implmeent this
+	// TODO: Implement this
 }
 
 type _WAVEFORMATEXTENSIBLE struct {
@@ -438,6 +461,8 @@ func (i *_IMMDevice) GetId() (string, error) {
 	if uint32(r) != uint32(windows.S_OK) {
 		return "", fmt.Errorf("oto: IMMDevice::GetId failed: HRESULT(%d)", uint32(r))
 	}
+	// The returned string is allocated by COM and must be released by the caller.
+	defer windows.CoTaskMemFree(unsafe.Pointer(strId))
 	return windows.UTF16PtrToString(strId), nil
 }
 
@@ -468,6 +493,9 @@ func (i *_IMMDeviceEnumerator) GetDefaultAudioEndPoint(dataFlow _EDataFlow, role
 	if uint32(r) != uint32(windows.S_OK) {
 		if isWin32Err(uint32(r)) {
 			return nil, fmt.Errorf("oto: IMMDeviceEnumerator::GetDefaultAudioEndPoint failed: %w", _E_NOTFOUND)
+		}
+		if isRPCErr(uint32(r)) {
+			return nil, fmt.Errorf("oto: IMMDeviceEnumerator::GetDefaultAudioEndPoint failed: %w", _RPC_ERR(r))
 		}
 		return nil, fmt.Errorf("oto: IMMDeviceEnumerator::GetDefaultAudioEndPoint failed: HRESULT(%d)", uint32(r))
 	}

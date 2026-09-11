@@ -17,6 +17,7 @@ package directx
 import (
 	"fmt"
 	"runtime"
+	"structs"
 	"syscall"
 	"unsafe"
 
@@ -65,6 +66,8 @@ const (
 )
 
 type _DXGI_SCALING int32
+
+const _DXGI_SCALING_STRETCH _DXGI_SCALING = 0
 
 type _DXGI_SWAP_CHAIN_FLAG int32
 
@@ -123,6 +126,7 @@ func _CreateDXGIFactory() (*_IDXGIFactory, error) {
 }
 
 type _DXGI_ADAPTER_DESC1 struct {
+	_                     structs.HostLayout
 	Description           [128]uint16
 	VendorId              uint32
 	DeviceId              uint32
@@ -136,6 +140,7 @@ type _DXGI_ADAPTER_DESC1 struct {
 }
 
 type _DXGI_MODE_DESC struct {
+	_                structs.HostLayout
 	Width            uint32
 	Height           uint32
 	RefreshRate      _DXGI_RATIONAL
@@ -145,11 +150,13 @@ type _DXGI_MODE_DESC struct {
 }
 
 type _DXGI_RATIONAL struct {
+	_           structs.HostLayout
 	Numerator   uint32
 	Denominator uint32
 }
 
 type _DXGI_SWAP_CHAIN_FULLSCREEN_DESC struct {
+	_                structs.HostLayout
 	RefreshRate      _DXGI_RATIONAL
 	ScanlineOrdering _DXGI_MODE_SCANLINE_ORDER
 	Scaling          _DXGI_MODE_SCALING
@@ -157,11 +164,13 @@ type _DXGI_SWAP_CHAIN_FULLSCREEN_DESC struct {
 }
 
 type _DXGI_SAMPLE_DESC struct {
+	_       structs.HostLayout
 	Count   uint32
 	Quality uint32
 }
 
 type _DXGI_SWAP_CHAIN_DESC struct {
+	_            structs.HostLayout
 	BufferDesc   _DXGI_MODE_DESC
 	SampleDesc   _DXGI_SAMPLE_DESC
 	BufferUsage  _DXGI_USAGE
@@ -172,16 +181,34 @@ type _DXGI_SWAP_CHAIN_DESC struct {
 	Flags        uint32
 }
 
+type _DXGI_SWAP_CHAIN_DESC1 struct {
+	_           structs.HostLayout
+	Width       uint32
+	Height      uint32
+	Format      _DXGI_FORMAT
+	Stereo      _BOOL
+	SampleDesc  _DXGI_SAMPLE_DESC
+	BufferUsage _DXGI_USAGE
+	BufferCount uint32
+	Scaling     _DXGI_SCALING
+	SwapEffect  _DXGI_SWAP_EFFECT
+	AlphaMode   _DXGI_ALPHA_MODE
+	Flags       uint32
+}
+
 type _LUID struct {
+	_        structs.HostLayout
 	LowPart  uint32
 	HighPart int32
 }
 
 type _IDXGIAdapter struct {
+	_    structs.HostLayout
 	vtbl *_IDXGIAdapter1_Vtbl
 }
 
 type _IDXGIAdapter_Vtbl struct {
+	_              structs.HostLayout
 	QueryInterface uintptr
 	AddRef         uintptr
 	Release        uintptr
@@ -220,10 +247,12 @@ func (i *_IDXGIAdapter) Release() uint32 {
 }
 
 type _IDXGIAdapter1 struct {
+	_    structs.HostLayout
 	vtbl *_IDXGIAdapter1_Vtbl
 }
 
 type _IDXGIAdapter1_Vtbl struct {
+	_              structs.HostLayout
 	QueryInterface uintptr
 	AddRef         uintptr
 	Release        uintptr
@@ -253,10 +282,12 @@ func (i *_IDXGIAdapter1) GetDesc1() (*_DXGI_ADAPTER_DESC1, error) {
 }
 
 type _IDXGIDevice struct {
+	_    structs.HostLayout
 	vtbl *_IDXGIDevice_Vtbl
 }
 
 type _IDXGIDevice_Vtbl struct {
+	_              structs.HostLayout
 	QueryInterface uintptr
 	AddRef         uintptr
 	Release        uintptr
@@ -287,10 +318,12 @@ func (i *_IDXGIDevice) Release() uint32 {
 }
 
 type _IDXGIFactory struct {
+	_    structs.HostLayout
 	vtbl *_IDXGIFactory_Vtbl
 }
 
 type _IDXGIFactory_Vtbl struct {
+	_              structs.HostLayout
 	QueryInterface uintptr
 	AddRef         uintptr
 	Release        uintptr
@@ -322,7 +355,7 @@ func (i *_IDXGIFactory) CreateSwapChain(pDevice unsafe.Pointer, pDesc *_DXGI_SWA
 func (i *_IDXGIFactory) MakeWindowAssociation(windowHandle windows.HWND, flags uint32) error {
 	r, _, _ := syscall.Syscall(i.vtbl.MakeWindowAssociation, 3, uintptr(unsafe.Pointer(i)), uintptr(windowHandle), uintptr(flags))
 	if uint32(r) != uint32(windows.S_OK) {
-		return fmt.Errorf("directx: IDXGIFactory::MakeWIndowAssociation failed: %w", handleError(windows.Handle(uint32(r))))
+		return fmt.Errorf("directx: IDXGIFactory::MakeWindowAssociation failed: %w", handleError(windows.Handle(uint32(r))))
 	}
 	return nil
 }
@@ -343,10 +376,12 @@ func (i *_IDXGIFactory) Release() uint32 {
 }
 
 type _IDXGIFactory4 struct {
+	_    structs.HostLayout
 	vtbl *_IDXGIFactory4_Vtbl
 }
 
 type _IDXGIFactory4_Vtbl struct {
+	_              structs.HostLayout
 	QueryInterface uintptr
 	AddRef         uintptr
 	Release        uintptr
@@ -378,6 +413,20 @@ type _IDXGIFactory4_Vtbl struct {
 	EnumWarpAdapter               uintptr
 }
 
+func (i *_IDXGIFactory4) CreateSwapChainForComposition(pDevice unsafe.Pointer, pDesc *_DXGI_SWAP_CHAIN_DESC1, pRestrictToOutput *_IDXGIOutput) (*_IDXGISwapChain, error) {
+	var swapChain *_IDXGISwapChain
+	r, _, _ := syscall.Syscall6(i.vtbl.CreateSwapChainForComposition, 5, uintptr(unsafe.Pointer(i)),
+		uintptr(pDevice), uintptr(unsafe.Pointer(pDesc)), uintptr(unsafe.Pointer(pRestrictToOutput)),
+		uintptr(unsafe.Pointer(&swapChain)), 0)
+	runtime.KeepAlive(pDevice)
+	runtime.KeepAlive(pDesc)
+	runtime.KeepAlive(pRestrictToOutput)
+	if uint32(r) != uint32(windows.S_OK) {
+		return nil, fmt.Errorf("directx: IDXGIFactory4::CreateSwapChainForComposition failed: %w", handleError(windows.Handle(uint32(r))))
+	}
+	return swapChain, nil
+}
+
 func (i *_IDXGIFactory4) EnumAdapters1(adapter uint32) (*_IDXGIAdapter1, error) {
 	var ptr *_IDXGIAdapter1
 	r, _, _ := syscall.Syscall(i.vtbl.EnumAdapters1, 3, uintptr(unsafe.Pointer(i)), uintptr(adapter), uintptr(unsafe.Pointer(&ptr)))
@@ -402,10 +451,12 @@ func (i *_IDXGIFactory4) Release() uint32 {
 }
 
 type _IDXGIFactory5 struct {
+	_    structs.HostLayout
 	vtbl *_IDXGIFactory5_Vtbl
 }
 
 type _IDXGIFactory5_Vtbl struct {
+	_              structs.HostLayout
 	QueryInterface uintptr
 	AddRef         uintptr
 	Release        uintptr
@@ -455,10 +506,12 @@ func (i *_IDXGIFactory5) Release() uint32 {
 }
 
 type _IDXGIOutput struct {
+	_    structs.HostLayout
 	vtbl *_IDXGIOutput_Vtbl
 }
 
 type _IDXGIOutput_Vtbl struct {
+	_              structs.HostLayout
 	QueryInterface uintptr
 	AddRef         uintptr
 	Release        uintptr
@@ -487,10 +540,12 @@ func (i *_IDXGIOutput) Release() uint32 {
 }
 
 type _IDXGISwapChain struct {
+	_    structs.HostLayout
 	vtbl *_IDXGISwapChain_Vtbl
 }
 
 type _IDXGISwapChain_Vtbl struct {
+	_              structs.HostLayout
 	QueryInterface uintptr
 	AddRef         uintptr
 	Release        uintptr
@@ -562,10 +617,12 @@ func (i *_IDXGISwapChain) Release() uint32 {
 }
 
 type _IDXGISwapChain4 struct {
+	_    structs.HostLayout
 	vtbl *_IDXGISwapChain4_Vtbl
 }
 
 type _IDXGISwapChain4_Vtbl struct {
+	_              structs.HostLayout
 	QueryInterface uintptr
 	AddRef         uintptr
 	Release        uintptr

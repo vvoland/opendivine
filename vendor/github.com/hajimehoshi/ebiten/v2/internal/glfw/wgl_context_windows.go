@@ -8,6 +8,7 @@ package glfw
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"unsafe"
 
@@ -242,18 +243,13 @@ func (w *Window) choosePixelFormat(ctxconfig *ctxconfig, fbconfig_ *fbconfig) (i
 func makeContextCurrentWGL(window *Window) error {
 	if window != nil {
 		if err := wglMakeCurrent(window.context.platform.dc, window.context.platform.handle); err != nil {
-			_ = _glfw.contextSlot.set(0)
+			_glfw.currentContext = nil
 			return err
 		}
-		if err := _glfw.contextSlot.set(uintptr(unsafe.Pointer(window))); err != nil {
-			return err
-		}
+		_glfw.currentContext = window
 	} else {
+		_glfw.currentContext = nil
 		if err := wglMakeCurrent(0, 0); err != nil {
-			_ = _glfw.contextSlot.set(0)
-			return err
-		}
-		if err := _glfw.contextSlot.set(0); err != nil {
 			return err
 		}
 	}
@@ -261,7 +257,7 @@ func makeContextCurrentWGL(window *Window) error {
 }
 
 func swapBuffersWGL(window *Window) error {
-	if window.monitor == nil && winver.IsWindowsVistaOrGreater() {
+	if !window.hasMonitor.Load() && winver.IsWindowsVistaOrGreater() {
 		// DWM Composition is always enabled on Win8+
 		enabled := winver.IsWindows8OrGreater()
 
@@ -291,7 +287,7 @@ func swapBuffersWGL(window *Window) error {
 func swapIntervalWGL(window *Window, interval int) error {
 	window.context.platform.interval = interval
 
-	if window.monitor == nil && winver.IsWindowsVistaOrGreater() {
+	if !window.hasMonitor.Load() && winver.IsWindowsVistaOrGreater() {
 		// DWM Composition is always enabled on Win8+
 		enabled := winver.IsWindows8OrGreater()
 
@@ -331,12 +327,7 @@ func extensionSupportedWGL(extension string) bool {
 		return false
 	}
 
-	for _, str := range strings.Split(extensions, " ") {
-		if extension == str {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(strings.Split(extensions, " "), extension)
 }
 
 func getProcAddressWGL(procname string) uintptr {
@@ -436,6 +427,7 @@ func initWGL() error {
 	_glfw.platformContext.ARB_context_flush_control = extensionSupportedWGL("WGL_ARB_context_flush_control")
 
 	if err := wglMakeCurrent(pdc, prc); err != nil {
+		_ = wglDeleteContext(rc)
 		return err
 	}
 	if err := wglDeleteContext(rc); err != nil {
@@ -560,12 +552,18 @@ func (w *Window) createContextWGL(ctxconfig *ctxconfig, fbconfig *fbconfig) erro
 		if err != nil {
 			return err
 		}
+
+		// Set the destroy function as soon as the context exists so that an
+		// error in the remaining steps still releases it.
+		w.context.destroy = destroyContextWGL
 	} else {
 		var err error
 		w.context.platform.handle, err = wglCreateContext(w.context.platform.dc)
 		if err != nil {
 			return err
 		}
+
+		w.context.destroy = destroyContextWGL
 
 		if share != 0 {
 			if err := wglShareLists(share, w.context.platform.handle); err != nil {
@@ -579,7 +577,6 @@ func (w *Window) createContextWGL(ctxconfig *ctxconfig, fbconfig *fbconfig) erro
 	w.context.swapInterval = swapIntervalWGL
 	w.context.extensionSupported = extensionSupportedWGL
 	w.context.getProcAddress = getProcAddressWGL
-	w.context.destroy = destroyContextWGL
 
 	return nil
 }

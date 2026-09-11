@@ -17,13 +17,13 @@
 package opengl
 
 import (
-	"github.com/hajimehoshi/ebiten/v2/internal/glfw"
+	"github.com/hajimehoshi/ebiten/v2/internal/color"
 	"github.com/hajimehoshi/ebiten/v2/internal/graphicsdriver"
 	"github.com/hajimehoshi/ebiten/v2/internal/graphicsdriver/opengl/gl"
 )
 
 type graphicsPlatform struct {
-	window *glfw.Window
+	presenter Presenter
 }
 
 // NewGraphics creates an implementation of graphicsdriver.Graphics for OpenGL.
@@ -34,52 +34,34 @@ func NewGraphics() (graphicsdriver.Graphics, error) {
 		return nil, err
 	}
 
-	if err := glfw.WindowHint(glfw.ClientAPI, glfw.OpenGLAPI); err != nil {
-		return nil, err
-	}
-	if err := glfw.WindowHint(glfw.ContextVersionMajor, 3); err != nil {
-		return nil, err
-	}
-	if err := glfw.WindowHint(glfw.ContextVersionMinor, 2); err != nil {
-		return nil, err
-	}
-	// macOS requires forward-compatible and a core profile.
-	if err := glfw.WindowHint(glfw.OpenGLForwardCompat, glfw.True); err != nil {
-		return nil, err
-	}
-	if err := glfw.WindowHint(glfw.OpenGLProfile, glfw.OpenGLCoreProfile); err != nil {
-		return nil, err
-	}
-
-	return newGraphics(ctx), nil
+	return newGraphics(ctx, color.ColorSpaceSRGB), nil
 }
 
-func (g *Graphics) SetGLFWWindow(window *glfw.Window) {
-	g.window = window
+// SetPresenter sets what the rendered frame is presented through.
+func (g *Graphics) SetPresenter(presenter Presenter) {
+	g.presenter = presenter
 }
 
 func (g *Graphics) makeContextCurrent() error {
-	return g.window.MakeContextCurrent()
+	return g.presenter.MakeContextCurrent()
 }
 
 func (g *Graphics) swapBuffers() error {
-	// Call SwapIntervals even though vsync is not changed.
+	// Call SwapInterval even though vsync is not changed.
 	// When toggling to fullscreen, vsync state might be reset unexpectedly (#1787).
 
 	// SwapInterval is affected by the current monitor of the window.
 	// This needs to be called at least after SetMonitor.
 	// Without SwapInterval after SetMonitor, vsynch doesn't work (#375).
+	var interval int
 	if g.vsync {
-		if err := g.window.SwapInterval(1); err != nil {
-			return err
-		}
-	} else {
-		if err := g.window.SwapInterval(0); err != nil {
-			return err
-		}
+		interval = 1
+	}
+	if err := g.presenter.SwapInterval(interval); err != nil {
+		return err
 	}
 
-	if err := g.window.SwapBuffers(); err != nil {
+	if err := g.presenter.SwapBuffers(); err != nil {
 		return err
 	}
 	return nil

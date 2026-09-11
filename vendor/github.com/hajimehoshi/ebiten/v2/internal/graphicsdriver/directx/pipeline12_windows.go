@@ -62,7 +62,7 @@ func init() {
 	if diff%4 != 0 {
 		panic("directx: unexpected attribute layout")
 	}
-	for i := 0; i < diff/4; i++ {
+	for i := range diff / 4 {
 		inputElementDescsForDX12 = append(inputElementDescsForDX12, _D3D12_INPUT_ELEMENT_DESC{
 			SemanticName:         &([]byte("COLOR\000"))[0],
 			SemanticIndex:        uint32(i) + 1,
@@ -144,8 +144,6 @@ type pipelineStates struct {
 	shaderDescriptorHeap *_ID3D12DescriptorHeap
 	shaderDescriptorSize uint32
 
-	samplerDescriptorHeap *_ID3D12DescriptorHeap
-
 	constantBuffers    [frameCount][]*_ID3D12Resource
 	constantBufferMaps [frameCount][]uintptr
 }
@@ -168,41 +166,24 @@ func (p *pipelineStates) initialize(device *_ID3D12Device) (ferr error) {
 	p.shaderDescriptorHeap = shaderH
 	defer func() {
 		if ferr != nil {
-			p.shaderDescriptorHeap.Release()
-			p.shaderDescriptorHeap = nil
+			p.release()
 		}
 	}()
 	p.shaderDescriptorSize = device.GetDescriptorHandleIncrementSize(_D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV)
 
-	samplerH, err := device.CreateDescriptorHeap(&_D3D12_DESCRIPTOR_HEAP_DESC{
-		Type:           _D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER,
-		NumDescriptors: 1,
-		Flags:          _D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,
-		NodeMask:       0,
-	})
-	if err != nil {
-		return err
-	}
-	p.samplerDescriptorHeap = samplerH
-
-	h, err := p.samplerDescriptorHeap.GetCPUDescriptorHandleForHeapStart()
-	if err != nil {
-		return err
-	}
-	device.CreateSampler(&_D3D12_SAMPLER_DESC{
-		Filter:         _D3D12_FILTER_MIN_MAG_MIP_POINT,
-		AddressU:       _D3D12_TEXTURE_ADDRESS_MODE_WRAP,
-		AddressV:       _D3D12_TEXTURE_ADDRESS_MODE_WRAP,
-		AddressW:       _D3D12_TEXTURE_ADDRESS_MODE_WRAP,
-		ComparisonFunc: _D3D12_COMPARISON_FUNC_NEVER,
-		MinLOD:         -math.MaxFloat32,
-		MaxLOD:         math.MaxFloat32,
-	}, h)
-
 	return nil
 }
 
-func (p *pipelineStates) drawTriangles(device *_ID3D12Device, commandList *_ID3D12GraphicsCommandList, frameIndex int, screen bool, srcs [graphics.ShaderSrcImageCount]*image12, shader *shader12, dstRegions []graphicsdriver.DstRegion, uniforms []uint32, blend graphicsdriver.Blend, indexOffset int, fillRule graphicsdriver.FillRule) error {
+// release releases the objects created by initialize.
+func (p *pipelineStates) release() {
+	if p.shaderDescriptorHeap != nil {
+		p.shaderDescriptorHeap.Release()
+		p.shaderDescriptorHeap = nil
+	}
+	p.shaderDescriptorSize = 0
+}
+
+func (p *pipelineStates) drawTriangles(device *_ID3D12Device, commandList *_ID3D12GraphicsCommandList, frameIndex int, screen bool, srcs [graphics.ShaderSrcImageCount]*image12, shader *shader12, dstRegions []graphicsdriver.DstRegion, uniforms []uint32, blend graphicsdriver.Blend, indexOffset int) error {
 	idx := len(p.constantBuffers[frameIndex])
 	if idx >= numDescriptorsPerFrame {
 		return fmt.Errorf("directx: too many constant buffers")
@@ -252,7 +233,7 @@ func (p *pipelineStates) drawTriangles(device *_ID3D12Device, commandList *_ID3D
 			SizeInBytes:    bufferSize,
 		}, h)
 
-		m, err = cb.Map(0, &_D3D12_RANGE{0, 0})
+		m, err = cb.Map(0, &_D3D12_RANGE{Begin: 0, End: 0})
 		if err != nil {
 			return err
 		}
@@ -294,7 +275,6 @@ func (p *pipelineStates) drawTriangles(device *_ID3D12Device, commandList *_ID3D
 
 	commandList.SetDescriptorHeaps([]*_ID3D12DescriptorHeap{
 		p.shaderDescriptorHeap,
-		p.samplerDescriptorHeap,
 	})
 
 	// Match the indices with rootParams in graphicsPipelineState.
@@ -305,19 +285,12 @@ func (p *pipelineStates) drawTriangles(device *_ID3D12Device, commandList *_ID3D
 	gh.Offset(offset, p.shaderDescriptorSize)
 	commandList.SetGraphicsRootDescriptorTable(0, gh)
 	commandList.SetGraphicsRootDescriptorTable(1, gh)
-	sh, err := p.samplerDescriptorHeap.GetGPUDescriptorHandleForHeapStart()
+
+	s, err := shader.pipelineState(blend, screen)
 	if err != nil {
 		return err
 	}
-	commandList.SetGraphicsRootDescriptorTable(2, sh)
-
-	if fillRule == graphicsdriver.FillRuleFillAll {
-		s, err := shader.pipelineState(blend, noStencil, screen)
-		if err != nil {
-			return err
-		}
-		commandList.SetPipelineState(s)
-	}
+	commandList.SetPipelineState(s)
 
 	for _, dstRegion := range dstRegions {
 		commandList.RSSetScissorRects([]_D3D12_RECT{
@@ -328,41 +301,15 @@ func (p *pipelineStates) drawTriangles(device *_ID3D12Device, commandList *_ID3D
 				bottom: int32(dstRegion.Region.Max.Y),
 			},
 		})
-		switch fillRule {
-		case graphicsdriver.FillRuleFillAll:
-			commandList.DrawIndexedInstanced(uint32(dstRegion.IndexCount), 1, uint32(indexOffset), 0, 0)
-		case graphicsdriver.FillRuleNonZero:
-			s, err := shader.pipelineState(blend, incrementStencil, screen)
-			if err != nil {
-				return err
-			}
-			commandList.SetPipelineState(s)
-			commandList.DrawIndexedInstanced(uint32(dstRegion.IndexCount), 1, uint32(indexOffset), 0, 0)
-		case graphicsdriver.FillRuleEvenOdd:
-			s, err := shader.pipelineState(blend, invertStencil, screen)
-			if err != nil {
-				return err
-			}
-			commandList.SetPipelineState(s)
-			commandList.DrawIndexedInstanced(uint32(dstRegion.IndexCount), 1, uint32(indexOffset), 0, 0)
-		}
-
-		if fillRule != graphicsdriver.FillRuleFillAll {
-			s, err := shader.pipelineState(blend, drawWithStencil, screen)
-			if err != nil {
-				return err
-			}
-			commandList.SetPipelineState(s)
-			commandList.DrawIndexedInstanced(uint32(dstRegion.IndexCount), 1, uint32(indexOffset), 0, 0)
-		}
-
+		commandList.DrawIndexedInstanced(uint32(dstRegion.IndexCount), 1, uint32(indexOffset), 0, 0)
 		indexOffset += dstRegion.IndexCount
 	}
 
 	return nil
 }
 
-func (p *pipelineStates) ensureRootSignature(device *_ID3D12Device) (rootSignature *_ID3D12RootSignature, ferr error) {
+// ensureRootSignature returns the root signature owned by p, which the caller must not release.
+func (p *pipelineStates) ensureRootSignature(device *_ID3D12Device) (*_ID3D12RootSignature, error) {
 	if p.rootSignature != nil {
 		return p.rootSignature, nil
 	}
@@ -381,13 +328,6 @@ func (p *pipelineStates) ensureRootSignature(device *_ID3D12Device) (rootSignatu
 		RegisterSpace:                     0,
 		OffsetInDescriptorsFromTableStart: 1,
 	}
-	sampler := _D3D12_DESCRIPTOR_RANGE{
-		RangeType:                         _D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, // s0
-		NumDescriptors:                    1,
-		BaseShaderRegister:                0,
-		RegisterSpace:                     0,
-		OffsetInDescriptorsFromTableStart: 0,
-	}
 
 	rootParams := [...]_D3D12_ROOT_PARAMETER{
 		{
@@ -403,14 +343,6 @@ func (p *pipelineStates) ensureRootSignature(device *_ID3D12Device) (rootSignatu
 			DescriptorTable: _D3D12_ROOT_DESCRIPTOR_TABLE{
 				NumDescriptorRanges: 1,
 				pDescriptorRanges:   &srv,
-			},
-			ShaderVisibility: _D3D12_SHADER_VISIBILITY_PIXEL,
-		},
-		{
-			ParameterType: _D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE,
-			DescriptorTable: _D3D12_ROOT_DESCRIPTOR_TABLE{
-				NumDescriptorRanges: 1,
-				pDescriptorRanges:   &sampler,
 			},
 			ShaderVisibility: _D3D12_SHADER_VISIBILITY_PIXEL,
 		},
@@ -433,76 +365,23 @@ func (p *pipelineStates) ensureRootSignature(device *_ID3D12Device) (rootSignatu
 	if err != nil {
 		return nil, err
 	}
-	defer func() {
-		if ferr != nil {
-			rootSignature.Release()
-		}
-	}()
 
 	p.rootSignature = rs
 
 	return p.rootSignature, nil
 }
 
-func (p *pipelineStates) newPipelineState(device *_ID3D12Device, vsh, psh *_ID3DBlob, blend graphicsdriver.Blend, stencilMode stencilMode, screen bool) (state *_ID3D12PipelineState, ferr error) {
+func (p *pipelineStates) newPipelineState(device *_ID3D12Device, vsh, psh *_ID3DBlob, blend graphicsdriver.Blend, screen bool) (*_ID3D12PipelineState, error) {
 	rootSignature, err := p.ensureRootSignature(device)
 	if err != nil {
 		return nil, err
 	}
-	defer func() {
-		if ferr != nil {
-			rootSignature.Release()
-		}
-	}()
 
-	depthStencilDesc := _D3D12_DEPTH_STENCIL_DESC{
-		DepthEnable:      0,
-		DepthWriteMask:   _D3D12_DEPTH_WRITE_MASK_ALL,
-		DepthFunc:        _D3D12_COMPARISON_FUNC_LESS,
-		StencilEnable:    0,
-		StencilReadMask:  _D3D12_DEFAULT_STENCIL_READ_MASK,
-		StencilWriteMask: _D3D12_DEFAULT_STENCIL_WRITE_MASK,
-		FrontFace: _D3D12_DEPTH_STENCILOP_DESC{
-			StencilFailOp:      _D3D12_STENCIL_OP_KEEP,
-			StencilDepthFailOp: _D3D12_STENCIL_OP_KEEP,
-			StencilPassOp:      _D3D12_STENCIL_OP_KEEP,
-			StencilFunc:        _D3D12_COMPARISON_FUNC_ALWAYS,
-		},
-		BackFace: _D3D12_DEPTH_STENCILOP_DESC{
-			StencilFailOp:      _D3D12_STENCIL_OP_KEEP,
-			StencilDepthFailOp: _D3D12_STENCIL_OP_KEEP,
-			StencilPassOp:      _D3D12_STENCIL_OP_KEEP,
-			StencilFunc:        _D3D12_COMPARISON_FUNC_ALWAYS,
-		},
-	}
-
-	var writeMask uint8
-	if stencilMode == noStencil || stencilMode == drawWithStencil {
-		writeMask = uint8(_D3D12_COLOR_WRITE_ENABLE_ALL)
-	}
-
-	switch stencilMode {
-	case incrementStencil:
-		depthStencilDesc.StencilEnable = 1
-		depthStencilDesc.FrontFace.StencilPassOp = _D3D12_STENCIL_OP_INCR
-		depthStencilDesc.BackFace.StencilPassOp = _D3D12_STENCIL_OP_DECR
-	case invertStencil:
-		depthStencilDesc.StencilEnable = 1
-		depthStencilDesc.FrontFace.StencilPassOp = _D3D12_STENCIL_OP_INVERT
-		depthStencilDesc.BackFace.StencilPassOp = _D3D12_STENCIL_OP_INVERT
-	case drawWithStencil:
-		depthStencilDesc.StencilEnable = 1
-		depthStencilDesc.FrontFace.StencilFunc = _D3D12_COMPARISON_FUNC_NOT_EQUAL
-		depthStencilDesc.BackFace.StencilFunc = _D3D12_COMPARISON_FUNC_NOT_EQUAL
-	}
+	writeMask := uint8(_D3D12_COLOR_WRITE_ENABLE_ALL)
 
 	rtvFormat := _DXGI_FORMAT_R8G8B8A8_UNORM
 	if screen {
 		rtvFormat = _DXGI_FORMAT_B8G8R8A8_UNORM
-	}
-	dsvFormat := _DXGI_FORMAT_UNKNOWN
-	if stencilMode != noStencil {
-		dsvFormat = _DXGI_FORMAT_D24_UNORM_S8_UINT
 	}
 
 	// Create a pipeline state.
@@ -548,7 +427,6 @@ func (p *pipelineStates) newPipelineState(device *_ID3D12Device, vsh, psh *_ID3D
 			ForcedSampleCount:     0,
 			ConservativeRaster:    _D3D12_CONSERVATIVE_RASTERIZATION_MODE_OFF,
 		},
-		DepthStencilState: depthStencilDesc,
 		InputLayout: _D3D12_INPUT_LAYOUT_DESC{
 			pInputElementDescs: &inputElementDescsForDX12[0],
 			NumElements:        uint32(len(inputElementDescsForDX12)),
@@ -558,7 +436,7 @@ func (p *pipelineStates) newPipelineState(device *_ID3D12Device, vsh, psh *_ID3D
 		RTVFormats: [8]_DXGI_FORMAT{
 			rtvFormat,
 		},
-		DSVFormat: dsvFormat,
+		DSVFormat: _DXGI_FORMAT_UNKNOWN,
 		SampleDesc: _DXGI_SAMPLE_DESC{
 			Count:   1,
 			Quality: 0,

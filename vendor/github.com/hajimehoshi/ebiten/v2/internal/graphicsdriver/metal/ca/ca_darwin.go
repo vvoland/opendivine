@@ -29,7 +29,7 @@ import (
 	"github.com/ebitengine/purego/objc"
 
 	"github.com/hajimehoshi/ebiten/v2/internal/cocoa"
-	"github.com/hajimehoshi/ebiten/v2/internal/graphicsdriver"
+	"github.com/hajimehoshi/ebiten/v2/internal/color"
 	"github.com/hajimehoshi/ebiten/v2/internal/graphicsdriver/metal/mtl"
 )
 
@@ -37,6 +37,7 @@ var (
 	class_CAMetalLayer             = objc.GetClass("CAMetalLayer")
 	class_CAMetalDisplayLink       = objc.GetClass("CAMetalDisplayLink")
 	class_CAMetalDisplayLinkUpdate = objc.GetClass("CAMetalDisplayLinkUpdate")
+	class_CATransaction            = objc.GetClass("CATransaction")
 )
 
 var (
@@ -58,12 +59,23 @@ var (
 	sel_alloc                      = objc.RegisterName("alloc")
 	sel_initWithMetalLayer         = objc.RegisterName("initWithMetalLayer:")
 	sel_setDelegate                = objc.RegisterName("setDelegate:")
-	sel_addToOneLoopForMode        = objc.RegisterName("addToRunLoop:forMode:")
-	sel_removeFromRunLoopForMode   = objc.RegisterName("removeFromRunLoop:forMode:")
+	sel_addToRunLoop_forMode       = objc.RegisterName("addToRunLoop:forMode:")
+	sel_removeFromRunLoop_forMode  = objc.RegisterName("removeFromRunLoop:forMode:")
 	sel_setPaused                  = objc.RegisterName("setPaused:")
+	sel_invalidate                 = objc.RegisterName("invalidate")
 	sel_drawable                   = objc.RegisterName("drawable")
 	sel_release                    = objc.RegisterName("release")
+	sel_addPresentedHandler        = objc.RegisterName("addPresentedHandler:")
+	sel_respondsToSelector         = objc.RegisterName("respondsToSelector:")
+	sel_flush                      = objc.RegisterName("flush")
 )
+
+// FlushTransaction commits any extant implicit Core Animation transaction on the calling thread.
+//
+// Reference: https://developer.apple.com/documentation/quartzcore/catransaction/1448270-flush.
+func FlushTransaction() {
+	objc.ID(class_CATransaction).Send(sel_flush)
+}
 
 // Layer is an object that manages image-based content and
 // allows you to perform animations on that content.
@@ -84,7 +96,7 @@ type MetalLayer struct {
 // NewMetalLayer creates a new Core Animation Metal layer.
 //
 // Reference: https://developer.apple.com/documentation/quartzcore/cametallayer?language=objc.
-func NewMetalLayer(colorSpace graphicsdriver.ColorSpace) (MetalLayer, error) {
+func NewMetalLayer(colorSpace color.ColorSpace) (MetalLayer, error) {
 	coreGraphics, err := purego.Dlopen("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics", purego.RTLD_LAZY|purego.RTLD_GLOBAL)
 	if err != nil {
 		return MetalLayer{}, err
@@ -102,20 +114,20 @@ func NewMetalLayer(colorSpace graphicsdriver.ColorSpace) (MetalLayer, error) {
 
 	var colorSpaceSym uintptr
 	switch colorSpace {
-	case graphicsdriver.ColorSpaceSRGB:
+	case color.ColorSpaceSRGB:
 		kCGColorSpaceSRGB, err := purego.Dlsym(coreGraphics, "kCGColorSpaceSRGB")
 		if err != nil {
 			return MetalLayer{}, err
 		}
 		colorSpaceSym = kCGColorSpaceSRGB
-	default:
-		fallthrough
-	case graphicsdriver.ColorSpaceDisplayP3:
+	case color.ColorSpaceDisplayP3:
 		kCGColorSpaceDisplayP3, err := purego.Dlsym(coreGraphics, "kCGColorSpaceDisplayP3")
 		if err != nil {
 			return MetalLayer{}, err
 		}
 		colorSpaceSym = kCGColorSpaceDisplayP3
+	default:
+		return MetalLayer{}, fmt.Errorf("ca: unsupported color space: %d", colorSpace)
 	}
 
 	layer := objc.ID(class_CAMetalLayer).Send(sel_new)
@@ -260,6 +272,18 @@ func (md MetalDrawable) Present() {
 	md.metalDrawable.Send(sel_present)
 }
 
+// AddPresentedHandler registers a block of code to be called immediately after the drawable is presented.
+//
+// Reference: https://developer.apple.com/documentation/metal/mtldrawable/2806858-addpresentedhandler?language=objc.
+func (md MetalDrawable) AddPresentedHandler(block objc.Block) {
+	md.metalDrawable.Send(sel_addPresentedHandler, block)
+}
+
+// CanAddPresentedHandler reports whether AddPresentedHandler is available.
+func (md MetalDrawable) CanAddPresentedHandler() bool {
+	return md.metalDrawable.Send(sel_respondsToSelector, sel_addPresentedHandler) != 0
+}
+
 // MetalDisplayLink is a class your Metal app uses to register for callbacks to synchronize its animations for a display.
 //
 // Reference: https://developer.apple.com/documentation/quartzcore/cametaldisplaylink?language=objc
@@ -278,14 +302,14 @@ func (m MetalDisplayLink) SetDelegate(delegate objc.ID) {
 //
 // Reference: https://developer.apple.com/documentation/quartzcore/cametaldisplaylink/add(to:formode:)?language=objc
 func (m MetalDisplayLink) AddToRunLoop(runLoop cocoa.NSRunLoop, mode cocoa.NSRunLoopMode) {
-	m.Send(sel_addToOneLoopForMode, runLoop, mode)
+	m.Send(sel_addToRunLoop_forMode, runLoop, mode)
 }
 
 // RemoveFromRunLoop removes a mode’s display link from a run loop.
 //
 // Reference: https://developer.apple.com/documentation/quartzcore/cametaldisplaylink/remove(from:formode:)?language=objc
 func (m MetalDisplayLink) RemoveFromRunLoop(runLoop cocoa.NSRunLoop, mode cocoa.NSRunLoopMode) {
-	m.Send(sel_removeFromRunLoopForMode, runLoop, mode)
+	m.Send(sel_removeFromRunLoop_forMode, runLoop, mode)
 }
 
 // SetPaused sets a Boolean value that indicates whether the system suspends the display link’s notifications to the target.
@@ -293,6 +317,13 @@ func (m MetalDisplayLink) RemoveFromRunLoop(runLoop cocoa.NSRunLoop, mode cocoa.
 // https://developer.apple.com/documentation/quartzcore/cametaldisplaylink/ispaused?language=objc
 func (m MetalDisplayLink) SetPaused(paused bool) {
 	m.Send(sel_setPaused, paused)
+}
+
+// Invalidate removes the display link from all run loop modes.
+//
+// Reference: https://developer.apple.com/documentation/quartzcore/cametaldisplaylink/invalidate()?language=objc
+func (m MetalDisplayLink) Invalidate() {
+	m.Send(sel_invalidate)
 }
 
 func (m MetalDisplayLink) Release() {

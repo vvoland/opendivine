@@ -230,6 +230,13 @@ package gl
 //   ((fn)(fnptr))(index);
 // }
 //
+// #cgo noescape glowFinish
+// #cgo nocallback glowFinish
+// static void glowFinish(uintptr_t fnptr) {
+//   typedef void (*fn)();
+//   ((fn)(fnptr))();
+// }
+//
 // #cgo noescape glowFlush
 // #cgo nocallback glowFlush
 // static void glowFlush(uintptr_t fnptr) {
@@ -561,6 +568,7 @@ type defaultContext struct {
 	gpDrawElements             C.uintptr_t
 	gpEnable                   C.uintptr_t
 	gpEnableVertexAttribArray  C.uintptr_t
+	gpFinish                   C.uintptr_t
 	gpFlush                    C.uintptr_t
 	gpFramebufferRenderbuffer  C.uintptr_t
 	gpFramebufferTexture2D     C.uintptr_t
@@ -743,6 +751,10 @@ func (c *defaultContext) DeleteFramebuffer(framebuffer uint32) {
 }
 
 func (c *defaultContext) DeleteProgram(program uint32) {
+	// A program is no longer valid after a context loss and must not be deleted.
+	if !c.IsProgram(program) {
+		return
+	}
 	C.glowDeleteProgram(c.gpDeleteProgram, C.GLuint(program))
 }
 
@@ -780,6 +792,10 @@ func (c *defaultContext) Enable(cap uint32) {
 
 func (c *defaultContext) EnableVertexAttribArray(index uint32) {
 	C.glowEnableVertexAttribArray(c.gpEnableVertexAttribArray, C.GLuint(index))
+}
+
+func (c *defaultContext) Finish() {
+	C.glowFinish(c.gpFinish)
 }
 
 func (c *defaultContext) Flush() {
@@ -863,6 +879,7 @@ func (c *defaultContext) PixelStorei(pname uint32, param int32) {
 
 func (c *defaultContext) ReadPixels(dst []byte, x int32, y int32, width int32, height int32, format uint32, xtype uint32) {
 	C.glowReadPixels(c.gpReadPixels, C.GLint(x), C.GLint(y), C.GLsizei(width), C.GLsizei(height), C.GLenum(format), C.GLenum(xtype), unsafe.Pointer(&dst[0]))
+	runtime.KeepAlive(dst)
 }
 
 func (c *defaultContext) RenderbufferStorage(target uint32, internalformat uint32, width int32, height int32) {
@@ -1009,6 +1026,7 @@ func (c *defaultContext) LoadFunctions() error {
 	c.gpDrawElements = C.uintptr_t(g.get("glDrawElements"))
 	c.gpEnable = C.uintptr_t(g.get("glEnable"))
 	c.gpEnableVertexAttribArray = C.uintptr_t(g.get("glEnableVertexAttribArray"))
+	c.gpFinish = C.uintptr_t(g.get("glFinish"))
 	c.gpFlush = C.uintptr_t(g.get("glFlush"))
 	c.gpFramebufferRenderbuffer = C.uintptr_t(g.get("glFramebufferRenderbuffer"))
 	c.gpFramebufferTexture2D = C.uintptr_t(g.get("glFramebufferTexture2D"))

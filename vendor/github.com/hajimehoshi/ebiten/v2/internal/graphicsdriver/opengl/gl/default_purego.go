@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build (darwin || freebsd || linux || netbsd || openbsd || windows) && !nintendosdk && !playstation5
+//go:build (darwin || freebsd || linux || netbsd || windows) && !nintendosdk && !playstation5
 
 package gl
 
@@ -54,6 +54,7 @@ type defaultContext struct {
 	gpDrawElements             uintptr
 	gpEnable                   uintptr
 	gpEnableVertexAttribArray  uintptr
+	gpFinish                   uintptr
 	gpFlush                    uintptr
 	gpFramebufferRenderbuffer  uintptr
 	gpFramebufferTexture2D     uintptr
@@ -236,6 +237,10 @@ func (c *defaultContext) DeleteFramebuffer(framebuffer uint32) {
 }
 
 func (c *defaultContext) DeleteProgram(program uint32) {
+	// A program is no longer valid after a context loss and must not be deleted.
+	if !c.IsProgram(program) {
+		return
+	}
 	purego.SyscallN(c.gpDeleteProgram, uintptr(program))
 }
 
@@ -273,6 +278,10 @@ func (c *defaultContext) Enable(cap uint32) {
 
 func (c *defaultContext) EnableVertexAttribArray(index uint32) {
 	purego.SyscallN(c.gpEnableVertexAttribArray, uintptr(index))
+}
+
+func (c *defaultContext) Finish() {
+	purego.SyscallN(c.gpFinish)
 }
 
 func (c *defaultContext) Flush() {
@@ -356,6 +365,7 @@ func (c *defaultContext) PixelStorei(pname uint32, param int32) {
 
 func (c *defaultContext) ReadPixels(dst []byte, x int32, y int32, width int32, height int32, format uint32, xtype uint32) {
 	purego.SyscallN(c.gpReadPixels, uintptr(x), uintptr(y), uintptr(width), uintptr(height), uintptr(format), uintptr(xtype), uintptr(unsafe.Pointer(&dst[0])))
+	runtime.KeepAlive(dst)
 }
 
 func (c *defaultContext) RenderbufferStorage(target uint32, internalformat uint32, width int32, height int32) {
@@ -502,6 +512,7 @@ func (c *defaultContext) LoadFunctions() error {
 	c.gpDrawElements = g.get("glDrawElements")
 	c.gpEnable = g.get("glEnable")
 	c.gpEnableVertexAttribArray = g.get("glEnableVertexAttribArray")
+	c.gpFinish = g.get("glFinish")
 	c.gpFlush = g.get("glFlush")
 	c.gpFramebufferRenderbuffer = g.get("glFramebufferRenderbuffer")
 	c.gpFramebufferTexture2D = g.get("glFramebufferTexture2D")

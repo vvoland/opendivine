@@ -23,7 +23,6 @@ import (
 	"github.com/hajimehoshi/ebiten/v2/internal/buffered"
 	"github.com/hajimehoshi/ebiten/v2/internal/graphics"
 	"github.com/hajimehoshi/ebiten/v2/internal/graphicsdriver"
-	"github.com/hajimehoshi/ebiten/v2/internal/restorable"
 )
 
 func canUseMipmap(imageType atlas.ImageType) bool {
@@ -78,7 +77,7 @@ func (m *Mipmap) ReadPixels(graphicsDriver graphicsdriver.Graphics, pixels []byt
 	return m.orig.ReadPixels(graphicsDriver, pixels, region)
 }
 
-func (m *Mipmap) DrawTriangles(srcs [graphics.ShaderSrcImageCount]*Mipmap, vertices []float32, indices []uint32, blend graphicsdriver.Blend, dstRegion image.Rectangle, srcRegions [graphics.ShaderSrcImageCount]image.Rectangle, shader *atlas.Shader, uniforms []uint32, fillRule graphicsdriver.FillRule, canSkipMipmap bool, hint restorable.Hint) {
+func (m *Mipmap) DrawTriangles(srcs [graphics.ShaderSrcImageCount]*Mipmap, vertices []float32, indices []uint32, blend graphicsdriver.Blend, dstRegion image.Rectangle, srcRegions [graphics.ShaderSrcImageCount]image.Rectangle, shader *atlas.Shader, uniforms []uint32, canSkipMipmap bool) {
 	if len(indices) == 0 {
 		return
 	}
@@ -92,7 +91,7 @@ func (m *Mipmap) DrawTriangles(srcs [graphics.ShaderSrcImageCount]*Mipmap, verti
 			}
 			imgs[i] = src.orig
 		}
-		m.orig.DrawTriangles(imgs, vertices, indices, blend, dstRegion, srcRegions, shader, uniforms, fillRule, hint)
+		m.orig.DrawTriangles(imgs, vertices, indices, blend, dstRegion, srcRegions, shader, uniforms)
 		m.markDirty()
 		return
 	}
@@ -147,7 +146,7 @@ func (m *Mipmap) DrawTriangles(srcs [graphics.ShaderSrcImageCount]*Mipmap, verti
 		imgs[i] = src.orig
 	}
 
-	m.orig.DrawTriangles(imgs, vertices, indices, blend, dstRegion, srcRegions, shader, uniforms, fillRule, hint)
+	m.orig.DrawTriangles(imgs, vertices, indices, blend, dstRegion, srcRegions, shader, uniforms)
 	m.markDirty()
 }
 
@@ -223,14 +222,14 @@ func (m *Mipmap) level(level int) *buffered.Image {
 
 	dstRegion := image.Rect(0, 0, dstW, dstH)
 	srcRegion := image.Rect(0, 0, srcW, srcH)
-	s.DrawTriangles([graphics.ShaderSrcImageCount]*buffered.Image{src}, vs, is, graphicsdriver.BlendCopy, dstRegion, [graphics.ShaderSrcImageCount]image.Rectangle{srcRegion}, atlas.LinearFilterShader, nil, graphicsdriver.FillRuleFillAll, restorable.HintOverwriteDstRegion)
+	s.DrawTriangles([graphics.ShaderSrcImageCount]*buffered.Image{src}, vs, is, graphicsdriver.BlendCopy, dstRegion, [graphics.ShaderSrcImageCount]image.Rectangle{srcRegion}, atlas.LinearFilterShader, nil)
 	m.setImg(level, s)
 
 	return m.imgs[level].img
 }
 
 func sizeForLevel(x int, level int) int {
-	for i := 0; i < level; i++ {
+	for range level {
 		x /= 2
 		if x == 0 {
 			return 0
@@ -246,9 +245,7 @@ func (m *Mipmap) Deallocate() {
 		}
 		img.img.Deallocate()
 	}
-	for k := range m.imgs {
-		delete(m.imgs, k)
-	}
+	clear(m.imgs)
 	m.orig.Deallocate()
 }
 
@@ -273,7 +270,7 @@ func mipmapLevelFromDistance(dx0, dy0, dx1, dy1, sx0, sy0, sx1, sy1 float32) int
 		return 0
 	}
 
-	level := 0
+	var level int
 	for scale < 0.25 {
 		level++
 		scale *= 4
@@ -283,8 +280,7 @@ func mipmapLevelFromDistance(dx0, dy0, dx1, dy1, sx0, sy0, sx1, sy1 float32) int
 		// If the image can be scaled into 0 size, adjust the level. (#839)
 		w, h := int(sx1-sx0), int(sy1-sy0)
 		for level >= 0 {
-			s := 1 << uint(level)
-			if (w > 0 && w/s == 0) || (h > 0 && h/s == 0) {
+			if (w > 0 && sizeForLevel(w, level) == 0) || (h > 0 && sizeForLevel(h, level) == 0) {
 				level--
 				continue
 			}
@@ -297,9 +293,7 @@ func mipmapLevelFromDistance(dx0, dy0, dx1, dy1, sx0, sy0, sx1, sy1 float32) int
 		}
 	}
 
-	if level > maxLevel {
-		level = maxLevel
-	}
+	level = min(level, maxLevel)
 
 	return level
 }

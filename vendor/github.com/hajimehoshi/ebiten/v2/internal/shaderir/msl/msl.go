@@ -48,21 +48,17 @@ func (c *compileContext) structName(p *shaderir.Program, t *shaderir.Type) strin
 	return n
 }
 
-func Prelude(unit shaderir.Unit) string {
-	str := `#include <metal_stdlib>
+func Prelude() string {
+	return `#include <metal_stdlib>
 
 using namespace metal;
+
+constexpr sampler __texelSampler(coord::pixel, filter::nearest, address::clamp_to_zero);
 
 template<typename T, typename U>
 T mod(T x, U y) {
 	return x - y * floor(x/y);
 }`
-	if unit == shaderir.Texels {
-		str += `
-
-constexpr sampler texture_sampler{filter::nearest};`
-	}
-	return str
 }
 
 const (
@@ -76,7 +72,7 @@ func Compile(p *shaderir.Program) (shader string) {
 	}
 
 	var lines []string
-	lines = append(lines, strings.Split(Prelude(p.Unit), "\n")...)
+	lines = append(lines, strings.Split(Prelude(), "\n")...)
 	lines = append(lines, "", "{{.Structs}}")
 
 	if len(p.Uniforms) > 0 {
@@ -381,7 +377,7 @@ func (c *compileContext) block(p *shaderir.Program, topBlock, block *shaderir.Bl
 		case shaderir.Unary:
 			var op string
 			switch e.Op {
-			case shaderir.Add, shaderir.Sub, shaderir.NotOp:
+			case shaderir.Add, shaderir.Sub, shaderir.NotOp, shaderir.ComplementOp:
 				op = opString(e.Op)
 			default:
 				op = fmt.Sprintf("?(unexpected op: %d)", e.Op)
@@ -393,6 +389,8 @@ func (c *compileContext) block(p *shaderir.Program, topBlock, block *shaderir.Bl
 				return fmt.Sprintf("all((%s) == (%s))", expr(&e.Exprs[0]), expr(&e.Exprs[1]))
 			case shaderir.VectorNotEqualOp:
 				return fmt.Sprintf("!all((%s) == (%s))", expr(&e.Exprs[0]), expr(&e.Exprs[1]))
+			case shaderir.AndNot:
+				return fmt.Sprintf("(%s) & ~(%s)", expr(&e.Exprs[0]), expr(&e.Exprs[1]))
 			}
 			return fmt.Sprintf("(%s) %s (%s)", expr(&e.Exprs[0]), opString(e.Op), expr(&e.Exprs[1]))
 		case shaderir.Selection:
@@ -413,14 +411,8 @@ func (c *compileContext) block(p *shaderir.Program, topBlock, block *shaderir.Bl
 				args = append(args, expr(&exp))
 			}
 			if callee.Type == shaderir.BuiltinFuncExpr && callee.BuiltinFunc == shaderir.TexelAt {
-				switch p.Unit {
-				case shaderir.Texels:
-					return fmt.Sprintf("%s.sample(texture_sampler, %s)", args[0], strings.Join(args[1:], ", "))
-				case shaderir.Pixels:
-					return fmt.Sprintf("%s.read(static_cast<uint2>(%s))", args[0], strings.Join(args[1:], ", "))
-				default:
-					panic(fmt.Sprintf("msl: unexpected unit: %d", p.Unit))
-				}
+				// The sampler returns a transparent texel for a position outside the texture.
+				return fmt.Sprintf("%s.sample(__texelSampler, %s)", args[0], strings.Join(args[1:], ", "))
 			}
 			if callee.Type == shaderir.BuiltinFuncExpr && (callee.BuiltinFunc == shaderir.Min || callee.BuiltinFunc == shaderir.Max) {
 				result := args[0]

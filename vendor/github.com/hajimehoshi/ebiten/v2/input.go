@@ -52,11 +52,36 @@ func InputChars() []rune {
 // Note that a Key represents a physical key of US keyboard layout.
 // For example, KeyQ represents Q key on US keyboards and ' (quote) key on Dvorak keyboards.
 //
+// For a modifier key ([KeyAlt], [KeyControl], [KeyShift], [KeyMeta], and their left and right variants),
+// IsKeyPressed reports true when the key was pressed at any point in the current tick, including a key
+// released in the current tick.
+//
 // IsKeyPressed is concurrent-safe.
 //
 // On Android (ebitenmobile), EbitenView must be focusable to enable to handle keyboard keys.
 func IsKeyPressed(key Key) bool {
 	return inputstate.Get().IsKeyPressed(ui.Key(key))
+}
+
+// IsCapsLockOn reports whether Caps Lock is on.
+//
+// The state is reported as off on platforms that do not report it, like mobiles and consoles.
+// On browsers, the state is the one carried by the last input event the app received.
+//
+// IsCapsLockOn is concurrent-safe.
+func IsCapsLockOn() bool {
+	return inputstate.Get().IsCapsLockOn()
+}
+
+// IsNumLockOn reports whether the numeric keypad produces digits instead of acting as navigation keys.
+//
+// The state is reported as on on platforms that do not report it, like mobiles and consoles, and on
+// macOS, where the numeric keypad always produces digits.
+// On browsers, the state is the one carried by the last input event the app received.
+//
+// IsNumLockOn is concurrent-safe.
+func IsNumLockOn() bool {
+	return inputstate.Get().IsNumLockOn()
 }
 
 // KeyName returns a key name for the current keyboard layout.
@@ -72,8 +97,8 @@ func KeyName(key Key) string {
 	return ui.Get().KeyName(ui.Key(key))
 }
 
-// CursorPosition returns a position of a mouse cursor relative to the game screen (window). The cursor position is
-// 'logical' position and this considers the scale of the screen.
+// CursorPosition returns a position of a mouse cursor relative to the game screen (window).
+// The cursor position is 'logical' position and this considers the scale of the screen.
 //
 // CursorPosition returns (0, 0) before the main loop on desktops and browsers.
 //
@@ -83,6 +108,18 @@ func KeyName(key Key) string {
 func CursorPosition() (x, y int) {
 	cx, cy := inputstate.Get().CursorPosition()
 	return int(cx), int(cy)
+}
+
+// CursorPositionF returns a high-precision position of a mouse cursor relative to the game screen (window).
+// The cursor position is 'logical' position and this considers the scale of the screen.
+//
+// CursorPositionF returns (0, 0) before the main loop on desktops and browsers.
+//
+// CursorPositionF always returns (0, 0) on mobile native applications.
+//
+// CursorPositionF is concurrent-safe.
+func CursorPositionF() (x, y float64) {
+	return inputstate.Get().CursorPosition()
 }
 
 // Wheel returns x and y offsets of the mouse wheel or touchpad scroll.
@@ -109,7 +146,9 @@ type GamepadID = gamepad.ID
 // GamepadSDLID returns a string with the GUID generated in the same way as SDL.
 // To detect devices, see also the community project of gamepad devices database: https://github.com/gabomdq/SDL_GameControllerDB
 //
-// GamepadSDLID always returns an empty string on browsers and mobiles.
+// GamepadSDLID returns an empty string on consoles, where no such GUID exists.
+//
+// GamepadSDLID returns an empty string before the game starts.
 //
 // GamepadSDLID is concurrent-safe.
 func GamepadSDLID(id GamepadID) string {
@@ -128,6 +167,8 @@ func GamepadSDLID(id GamepadID) string {
 //   - Chrome: "Xbox 360 Controller (XInput STANDARD GAMEPAD)"
 //   - Firefox: "xinput"
 //
+// GamepadName returns an empty string before the game starts.
+//
 // GamepadName is concurrent-safe.
 func GamepadName(id GamepadID) string {
 	g := gamepad.Get(id)
@@ -139,6 +180,8 @@ func GamepadName(id GamepadID) string {
 
 // AppendGamepadIDs appends available gamepad IDs to gamepadIDs, and returns the extended buffer.
 // Giving a slice that already has enough capacity works efficiently.
+//
+// AppendGamepadIDs appends no ID before the game starts.
 //
 // AppendGamepadIDs is concurrent-safe.
 func AppendGamepadIDs(gamepadIDs []GamepadID) []GamepadID {
@@ -153,6 +196,8 @@ func GamepadIDs() []GamepadID {
 }
 
 // GamepadAxisCount returns the number of axes of the gamepad (id).
+//
+// GamepadAxisCount returns 0 before the game starts.
 //
 // GamepadAxisCount is concurrent-safe.
 func GamepadAxisCount(id GamepadID) int {
@@ -171,6 +216,9 @@ func GamepadAxisNum(id GamepadID) int {
 }
 
 // GamepadAxisValue returns a float value [-1.0 - 1.0] of the given gamepad (id)'s axis (axis).
+// The value depends on the gamepad layout.
+//
+// GamepadAxisValue returns 0 before the game starts.
 //
 // GamepadAxisValue is concurrent-safe.
 func GamepadAxisValue(id GamepadID, axis GamepadAxisType) float64 {
@@ -190,6 +238,8 @@ func GamepadAxis(id GamepadID, axis GamepadAxisType) float64 {
 
 // GamepadButtonCount returns the number of the buttons of the given gamepad (id).
 //
+// GamepadButtonCount returns 0 before the game starts.
+//
 // GamepadButtonCount is concurrent-safe.
 func GamepadButtonCount(id GamepadID) int {
 	g := gamepad.Get(id)
@@ -198,7 +248,7 @@ func GamepadButtonCount(id GamepadID) int {
 	}
 
 	// For backward compatibility, hats are treated as buttons in GLFW.
-	return g.ButtonCount() + g.HatCount()*4
+	return g.ButtonCountWithHats()
 }
 
 // GamepadButtonNum returns the number of the buttons of the given gamepad (id).
@@ -213,6 +263,8 @@ func GamepadButtonNum(id GamepadID) int {
 // If you want to know whether the given button of gamepad (id) started being pressed in the current tick,
 // use inpututil.IsGamepadButtonJustPressed
 //
+// IsGamepadButtonPressed returns false before the game starts.
+//
 // IsGamepadButtonPressed is concurrent-safe.
 //
 // The relationships between physical buttons and button IDs depend on environments.
@@ -223,23 +275,16 @@ func IsGamepadButtonPressed(id GamepadID, button GamepadButton) bool {
 		return false
 	}
 
-	nbuttons := g.ButtonCount()
-	if int(button) < nbuttons {
-		return g.Button(int(button))
-	}
-
 	// For backward compatibility, hats are treated as buttons in GLFW.
-	if hat := (int(button) - nbuttons) / 4; hat < g.HatCount() {
-		dir := (int(button) - nbuttons) % 4
-		return g.Hat(hat)&(1<<dir) != 0
-	}
-
-	return false
+	return g.IsButtonPressedWithHats(int(button))
 }
 
 // StandardGamepadAxisValue returns a float value [-1.0 - 1.0] of the given gamepad (id)'s standard axis (axis).
+// For a horizontal axis, -1.0 means left and 1.0 means right.
+// For a vertical axis, -1.0 means up and 1.0 means down.
 //
 // StandardGamepadAxisValue returns 0 when the gamepad doesn't have a standard gamepad layout mapping.
+// StandardGamepadAxisValue returns 0 before the game starts.
 //
 // StandardGamepadAxisValue is concurrent safe.
 func StandardGamepadAxisValue(id GamepadID, axis StandardGamepadAxis) float64 {
@@ -253,6 +298,7 @@ func StandardGamepadAxisValue(id GamepadID, axis StandardGamepadAxis) float64 {
 // StandardGamepadButtonValue returns a float value [0.0 - 1.0] of the given gamepad (id)'s standard button (button).
 //
 // StandardGamepadButtonValue returns 0 when the gamepad doesn't have a standard gamepad layout mapping.
+// StandardGamepadButtonValue returns 0 before the game starts.
 //
 // StandardGamepadButtonValue is concurrent safe.
 func StandardGamepadButtonValue(id GamepadID, button StandardGamepadButton) float64 {
@@ -266,6 +312,7 @@ func StandardGamepadButtonValue(id GamepadID, button StandardGamepadButton) floa
 // IsStandardGamepadButtonPressed reports whether the given gamepad (id)'s standard gamepad button (button) is pressed.
 //
 // IsStandardGamepadButtonPressed returns false when the gamepad doesn't have a standard gamepad layout mapping.
+// IsStandardGamepadButtonPressed returns false before the game starts.
 //
 // IsStandardGamepadButtonPressed is concurrent safe.
 func IsStandardGamepadButtonPressed(id GamepadID, button StandardGamepadButton) bool {
@@ -278,6 +325,8 @@ func IsStandardGamepadButtonPressed(id GamepadID, button StandardGamepadButton) 
 
 // IsStandardGamepadLayoutAvailable reports whether the gamepad (id) has a standard gamepad layout mapping.
 //
+// IsStandardGamepadLayoutAvailable returns false before the game starts.
+//
 // IsStandardGamepadLayoutAvailable is concurrent-safe.
 func IsStandardGamepadLayoutAvailable(id GamepadID) bool {
 	g := gamepad.Get(id)
@@ -289,6 +338,8 @@ func IsStandardGamepadLayoutAvailable(id GamepadID) bool {
 
 // IsStandardGamepadAxisAvailable reports whether the standard gamepad axis is available on the gamepad (id).
 //
+// IsStandardGamepadAxisAvailable returns false before the game starts.
+//
 // IsStandardGamepadAxisAvailable is concurrent-safe.
 func IsStandardGamepadAxisAvailable(id GamepadID, axis StandardGamepadAxis) bool {
 	g := gamepad.Get(id)
@@ -299,6 +350,8 @@ func IsStandardGamepadAxisAvailable(id GamepadID, axis StandardGamepadAxis) bool
 }
 
 // IsStandardGamepadButtonAvailable reports whether the standard gamepad button is available on the gamepad (id).
+//
+// IsStandardGamepadButtonAvailable returns false before the game starts.
 //
 // IsStandardGamepadButtonAvailable is concurrent-safe.
 func IsStandardGamepadButtonAvailable(id GamepadID, button StandardGamepadButton) bool {
@@ -332,8 +385,6 @@ func IsStandardGamepadButtonAvailable(id GamepadID, button StandardGamepadButton
 //	"Android":  GOOS=android
 //	"iOS":      GOOS=ios
 //	"":         Any GOOS
-//
-// On platforms where gamepad mappings are not managed by Ebitengine, this always returns false and nil.
 //
 // UpdateStandardGamepadLayoutMappings is concurrent-safe.
 //
@@ -377,5 +428,15 @@ func TouchIDs() []TouchID {
 //
 // TouchPosition is concurrent-safe.
 func TouchPosition(id TouchID) (int, int) {
+	x, y := inputstate.Get().TouchPosition(ui.TouchID(id))
+	return int(x), int(y)
+}
+
+// TouchPositionF returns a high-precision position for the touch of the specified ID.
+//
+// If the touch of the specified ID is not present, TouchPositionF returns (0, 0).
+//
+// TouchPositionF is concurrent-safe.
+func TouchPositionF(id TouchID) (float64, float64) {
 	return inputstate.Get().TouchPosition(ui.TouchID(id))
 }

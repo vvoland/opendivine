@@ -17,13 +17,14 @@ package ui
 import (
 	"errors"
 	"image"
-	"sync"
 	"sync/atomic"
 
 	_ "github.com/ebitengine/hideconsole"
 
 	"github.com/hajimehoshi/ebiten/v2/internal/atlas"
-	"github.com/hajimehoshi/ebiten/v2/internal/graphicsdriver"
+	"github.com/hajimehoshi/ebiten/v2/internal/color"
+	"github.com/hajimehoshi/ebiten/v2/internal/colormode"
+	"github.com/hajimehoshi/ebiten/v2/internal/graphicscommand"
 	"github.com/hajimehoshi/ebiten/v2/internal/mipmap"
 	"github.com/hajimehoshi/ebiten/v2/internal/thread"
 )
@@ -73,8 +74,7 @@ const (
 )
 
 type UserInterface struct {
-	err  error
-	errM sync.Mutex
+	err atomic.Pointer[error]
 
 	isScreenClearedEveryFrame atomic.Bool
 	graphicsLibrary           atomic.Int32
@@ -83,11 +83,32 @@ type UserInterface struct {
 	tick                      atomic.Int64
 	inputTime                 atomic.Int64
 
+	// preferredColorMode is the color mode the application prefers.
+	//
+	// preferredColorMode is a property of the application rather than of the window: it is kept
+	// even where no window can reflect it.
+	preferredColorMode atomic.Int32
+
+	// refreshRate is the refresh rate, in Hz, of the display the game is presented on.
+	// It is 0 when the rate is unknown.
+	refreshRate atomic.Int32
+
 	whiteImage *Image
 
 	mainThread thread.Thread
 
 	userInterfaceImpl
+}
+
+func (u *UserInterface) PreferredColorMode() colormode.ColorMode {
+	return colormode.ColorMode(u.preferredColorMode.Load())
+}
+
+func (u *UserInterface) SetPreferredColorMode(mode colormode.ColorMode) {
+	if colormode.ColorMode(u.preferredColorMode.Swap(int32(mode))) == mode {
+		return
+	}
+	u.Window().applyColorMode()
 }
 
 var (
@@ -105,6 +126,18 @@ func init() {
 
 func Get() *UserInterface {
 	return theUI
+}
+
+// GraphicsMaxImageSize returns the maximum image size the graphics driver supports. The graphics
+// driver must be initialized before this is called.
+func (u *UserInterface) GraphicsMaxImageSize() int {
+	return graphicscommand.MaxImageSize(u.graphicsDriver)
+}
+
+// GraphicsColorSpace returns the graphics driver's color space. The graphics driver must be
+// initialized before this is called.
+func (u *UserInterface) GraphicsColorSpace() color.ColorSpace {
+	return u.graphicsDriver.ColorSpace()
 }
 
 // newUserInterface must be called from the main thread.
@@ -128,12 +161,12 @@ func newUserInterface() (*UserInterface, error) {
 	return u, nil
 }
 
-func (u *UserInterface) readPixels(mipmap *mipmap.Mipmap, pixels []byte, region image.Rectangle) error {
+func (u *UserInterface) readPixels(img *Image, pixels []byte, region image.Rectangle) error {
 	if !u.running.Load() {
 		panic("ui: ReadPixels cannot be called before the game starts")
 	}
 
-	ok, err := mipmap.ReadPixels(u.graphicsDriver, pixels, region)
+	ok, err := img.readPixels(pixels, region)
 	if err != nil {
 		return err
 	}
@@ -146,11 +179,11 @@ func (u *UserInterface) readPixels(mipmap *mipmap.Mipmap, pixels []byte, region 
 		// This never happens so far, but if handling inputs after EndFrame is implemented,
 		// this might be possible (#1704).
 
-		var err1 error
+		var err error
 		u.context.runInFrame(func() {
-			ok, err := mipmap.ReadPixels(u.graphicsDriver, pixels, region)
-			if err != nil {
-				err1 = err
+			ok, imgErr := img.readPixels(pixels, region)
+			if imgErr != nil {
+				err = imgErr
 				return
 			}
 			if !ok {
@@ -158,7 +191,7 @@ func (u *UserInterface) readPixels(mipmap *mipmap.Mipmap, pixels []byte, region 
 				panic("ui: ReadPixels unexpectedly failed")
 			}
 		})
-		return err1
+		return err
 	}
 
 	return nil
@@ -179,29 +212,47 @@ type RunOptions struct {
 	SkipTaskbar              bool
 	SingleThread             bool
 	DisableHiDPI             bool
-	ColorSpace               graphicsdriver.ColorSpace
+	ColorSpace               color.ColorSpace
 	ApplePressAndHoldEnabled bool
 	X11ClassName             string
 	X11InstanceName          string
-	StrictContextRestoration bool
+	InitWindowWidthInDIP     int
+	InitWindowHeightInDIP    int
+	WindowPositionSet        bool
+	VMGuestEndpoint          string
 }
 
-// InitialWindowPosition returns the position for centering the given second width/height pair within the first width/height pair.
+// InitialWindowPosition returns the position to place a window of size (ww, wh) in a monitor of size (mw, mh).
 func InitialWindowPosition(mw, mh, ww, wh int) (x, y int) {
+	// The vertical position is visually centered rather than exactly centered: the space below the window
+	// is about twice the space above it. This follows the "Positioning Windows" section in the old Apple
+	// Human Interface Guidelines.
+	// http://web.archive.org/web/20110531113415/http://developer.apple.com/library/mac/#documentation/UserExperience/Conceptual/AppleHIGuidelines/XHIGWindows/XHIGWindows.html
 	return (mw - ww) / 2, (mh - wh) / 3
 }
 
 func (u *UserInterface) error() error {
-	u.errM.Lock()
-	defer u.errM.Unlock()
-	return u.err
+	if err := u.err.Load(); err != nil {
+		return *err
+	}
+	return nil
 }
 
 func (u *UserInterface) setError(err error) {
-	u.errM.Lock()
-	defer u.errM.Unlock()
-	if u.err == nil {
-		u.err = err
+	if err == nil {
+		return
+	}
+	for {
+		oldErr := u.err.Load()
+		var newErr error
+		if oldErr != nil {
+			newErr = errors.Join(*oldErr, err)
+		} else {
+			newErr = err
+		}
+		if u.err.CompareAndSwap(oldErr, &newErr) {
+			break
+		}
 	}
 }
 
@@ -221,7 +272,25 @@ func (u *UserInterface) GraphicsLibrary() GraphicsLibrary {
 	return GraphicsLibrary(u.graphicsLibrary.Load())
 }
 
+func (u *UserInterface) setRefreshRate(refreshRate int) {
+	u.refreshRate.Store(int32(refreshRate))
+}
+
+// RefreshRate returns the refresh rate, in Hz, of the display the game is presented on.
+// It returns 0 when the rate is unknown.
+func (u *UserInterface) RefreshRate() int {
+	return int(u.refreshRate.Load())
+}
+
+// IsRunning reports whether the game is running, which is when the graphics driver exists.
+func (u *UserInterface) IsRunning() bool {
+	return u.isRunning()
+}
+
 func (u *UserInterface) isRunning() bool {
+	// TODO: Replace the running state with the existence of a published backend
+	// for all the platforms, like the desktop build (see setRunningBackend in
+	// ui_desktop.go), and remove the running flag.
 	return u.running.Load() && !u.isTerminated()
 }
 
@@ -243,7 +312,15 @@ func (u *UserInterface) Tick() int64 {
 
 func (u *UserInterface) incrementTick() {
 	u.tick.Add(1)
-	u.inputTime.Store(int64(NewInputTimeFromTick(u.tick.Load())))
+}
+
+// advanceInputTimeToNextTick stamps the input events recorded from now on with the next tick.
+//
+// This must be called right after a tick's input snapshot is taken. An event can be recorded in the
+// middle of a tick, as a main-thread operation like resizing the window pumps the event queue there,
+// and the next tick is the first one that can report its edge.
+func (u *UserInterface) advanceInputTimeToNextTick() {
+	u.inputTime.Store(int64(NewInputTimeFromTick(u.tick.Load() + 1)))
 }
 
 func (u *UserInterface) InputTime() InputTime {

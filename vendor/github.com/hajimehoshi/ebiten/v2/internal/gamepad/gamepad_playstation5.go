@@ -54,9 +54,7 @@ func (g *nativeGamepadsImpl) update(gamepads *gamepads) error {
 		C.ebitengine_GetGamepads(&g.gamepads[0])
 	}
 
-	for id := range g.ids {
-		delete(g.ids, id)
-	}
+	clear(g.ids)
 
 	for _, gp := range g.gamepads {
 		if g.ids == nil {
@@ -77,18 +75,17 @@ func (g *nativeGamepadsImpl) update(gamepads *gamepads) error {
 			}
 		}
 
-		gamepad.m.Lock()
-		n := gamepad.native.(*nativeGamepadImpl)
-		for i := range n.axisValues {
-			n.axisValues[i] = float64(gp.axis_values[i])
-		}
-		for i := range n.buttonValues {
-			n.buttonValues[i] = float64(gp.button_values[i])
-		}
-		for i := range n.buttonPressed {
-			n.buttonPressed[i] = gp.button_pressed[i] != 0
-		}
-		gamepad.m.Unlock()
+		withNative(gamepad, func(n *nativeGamepadImpl) {
+			for i := range n.axisValues {
+				n.axisValues[i] = float64(gp.axis_values[i])
+			}
+			for i := range n.buttonValues {
+				n.buttonValues[i] = float64(gp.button_values[i])
+			}
+			for i := range n.buttonPressed {
+				n.buttonPressed[i] = gp.button_pressed[i] != 0
+			}
+		})
 	}
 
 	// Remove an unused gamepads.

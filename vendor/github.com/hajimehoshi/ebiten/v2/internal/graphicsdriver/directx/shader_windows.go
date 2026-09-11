@@ -16,14 +16,15 @@ package directx
 
 import (
 	"fmt"
-	"sync"
 	"unsafe"
 
 	"golang.org/x/sync/errgroup"
 
 	"github.com/hajimehoshi/ebiten/v2/internal/graphics"
+	"github.com/hajimehoshi/ebiten/v2/internal/microsoftgdk"
 	"github.com/hajimehoshi/ebiten/v2/internal/shaderir"
 	"github.com/hajimehoshi/ebiten/v2/internal/shaderir/hlsl"
+	"github.com/hajimehoshi/ebiten/v2/internal/shaderprecomp"
 )
 
 const (
@@ -34,49 +35,10 @@ const (
 	PixelShaderEntryPoint  = "PSMain"
 )
 
-type fxcPair struct {
-	vertex []byte
-	pixel  []byte
-}
-
-type precompiledFXCs struct {
-	binaries map[shaderir.SourceHash]fxcPair
-	m        sync.Mutex
-}
-
-func (c *precompiledFXCs) put(hash shaderir.SourceHash, vertex, pixel []byte) {
-	c.m.Lock()
-	defer c.m.Unlock()
-
-	if c.binaries == nil {
-		c.binaries = map[shaderir.SourceHash]fxcPair{}
-	}
-	if _, ok := c.binaries[hash]; ok {
-		panic(fmt.Sprintf("directx: the precompiled library for the hash %s is already registered", hash.String()))
-	}
-	c.binaries[hash] = fxcPair{
-		vertex: vertex,
-		pixel:  pixel,
-	}
-}
-
-func (c *precompiledFXCs) get(hash shaderir.SourceHash) ([]byte, []byte) {
-	c.m.Lock()
-	defer c.m.Unlock()
-
-	f := c.binaries[hash]
-	return f.vertex, f.pixel
-}
-
-var thePrecompiledFXCs precompiledFXCs
-
-func RegisterPrecompiledFXCs(source []byte, vertex, pixel []byte) {
-	thePrecompiledFXCs.put(shaderir.CalcSourceHash(source), vertex, pixel)
-}
-
 var vertexShaderCache = map[string]*_ID3DBlob{}
 
-func compileShader(program *shaderir.Program) (vsh, psh *_ID3DBlob, ferr error) {
+func compileShader(program *shaderir.Program) (_, _ *_ID3DBlob, ferr error) {
+	var vsh, psh *_ID3DBlob
 	defer func() {
 		if ferr == nil {
 			return
@@ -89,7 +51,13 @@ func compileShader(program *shaderir.Program) (vsh, psh *_ID3DBlob, ferr error) 
 		}
 	}()
 
-	if vshBin, pshBin := thePrecompiledFXCs.get(program.SourceHash); vshBin != nil && pshBin != nil {
+	// Windows and Xbox precompiled binaries are registered separately as a precaution, since Xbox uses
+	// the GDK's own shader compiler and the binaries are not guaranteed to be interchangeable.
+	dxbcPlatform := shaderprecomp.DXBCPlatformWindows
+	if microsoftgdk.IsXbox() {
+		dxbcPlatform = shaderprecomp.DXBCPlatformXbox
+	}
+	if vshBin, pshBin, ok := shaderprecomp.DXBCs(program.SourceID, dxbcPlatform); ok {
 		var err error
 		if vsh, err = _D3DCreateBlob(uint(len(vshBin))); err != nil {
 			return nil, nil, err

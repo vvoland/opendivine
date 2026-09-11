@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build darwin || freebsd || linux || netbsd || openbsd || windows
+//go:build darwin || freebsd || linux || netbsd || windows
 
 package glfw
 
@@ -110,8 +110,16 @@ const (
 	Stereo                 = Hint(0x0002100C)
 	TransparentFramebuffer = Hint(0x0002000A)
 	Visible                = Hint(0x00020004)
+	CocoaRetinaFramebuffer = Hint(0x00023001)
+	CocoaFrameName         = Hint(0x00023002)
+	CocoaGraphicsSwitching = Hint(0x00023003)
 	X11ClassName           = Hint(0x00024001)
 	X11InstanceName        = Hint(0x00024002)
+
+	// Win32NoRedirectionBitmap specifies whether the window is created without a redirection surface
+	// (WS_EX_NOREDIRECTIONBITMAP). Only set this when the content is presented through
+	// DirectComposition, as such a window shows nothing otherwise.
+	Win32NoRedirectionBitmap = Hint(0x10000001)
 )
 
 const (

@@ -27,11 +27,10 @@ import (
 	"github.com/hajimehoshi/ebiten/v2/internal/affine"
 	"github.com/hajimehoshi/ebiten/v2/internal/atlas"
 	"github.com/hajimehoshi/ebiten/v2/internal/builtinshader"
+	"github.com/hajimehoshi/ebiten/v2/internal/colormshader"
 	"github.com/hajimehoshi/ebiten/v2/internal/graphics"
 	"github.com/hajimehoshi/ebiten/v2/internal/graphicscommand"
 	"github.com/hajimehoshi/ebiten/v2/internal/graphicsdriver"
-	"github.com/hajimehoshi/ebiten/v2/internal/restorable"
-	"github.com/hajimehoshi/ebiten/v2/internal/shaderir"
 	"github.com/hajimehoshi/ebiten/v2/internal/ui"
 )
 
@@ -71,6 +70,10 @@ type Image struct {
 	// atime needs to be an atomic value since a sub-image atime can be accessed from its original image.
 	atime atomic.Int64
 
+	// recyclable reports whether the image was created via [Image.RecyclableSubImage]
+	// and can be returned to the pool via [Image.Recycle].
+	recyclable bool
+
 	// usageCallbacks are callbacks that are invoked when the image is used.
 	// usageCallbacks is valid only when the image is not a sub-image.
 	usageCallbacks map[int64]usageCallback
@@ -83,6 +86,12 @@ type Image struct {
 
 	// Do not add a 'buffering' member that are resolved lazily.
 	// This tends to forget resolving the buffer easily (#2362).
+}
+
+// theImagePool is a global pool of Image structs to reduce allocations.
+// [Image.RecyclableSubImage] draws from this pool; [Image.Recycle] returns to it.
+var theImagePool = sync.Pool{
+	New: func() any { return &Image{} },
 }
 
 type usageCallback struct {
@@ -234,6 +243,20 @@ func (i *Image) adjustedBounds() image.Rectangle {
 	return image.Rect(x, y, x+b.Dx(), y+b.Dy())
 }
 
+func init() {
+	// The bridge serves module-internal packages drawing at the internal image layer (e.g. vmhost);
+	// the ui package cannot import this package.
+	ui.SetImageFromEbitenImageFunc(func(img any) (*ui.Image, image.Rectangle) {
+		i := img.(*Image)
+		i.copyCheck()
+		if i.isDisposed() {
+			return nil, image.Rectangle{}
+		}
+		i.invokeUsageCallbacks()
+		return i.image, i.adjustedBounds()
+	})
+}
+
 // DrawImage draws the given image on the image i.
 //
 // DrawImage accepts the options. For details, see the document of
@@ -243,13 +266,13 @@ func (i *Image) adjustedBounds() image.Rectangle {
 // adopted. Even if the argument image is mutated after this call, the drawing
 // result is never affected.
 //
-// When the image i is disposed, DrawImage does nothing.
 // When the given image img is disposed, DrawImage panics.
+// When the image i is disposed and img is not, DrawImage does nothing.
 //
 // When the given image is as same as i, DrawImage panics.
 //
 // DrawImage works more efficiently as batches
-// when the successive calls of DrawImages satisfy the below conditions:
+// when the successive calls of DrawImage satisfy the below conditions:
 //
 //   - All render targets are the same (A in A.DrawImage(B, op))
 //   - All Blend values are the same
@@ -324,41 +347,17 @@ func (i *Image) DrawImage(img *Image, options *DrawImageOptions) {
 		var translation [4]float32
 		colorm.Elements(body[:], translation[:])
 		i.tmpUniforms = shader.appendUniforms(i.tmpUniforms, map[string]any{
-			builtinshader.UniformColorMBody:        body[:],
-			builtinshader.UniformColorMTranslation: translation[:],
+			colormshader.UniformColorMBody:        body[:],
+			colormshader.UniformColorMTranslation: translation[:],
 		})
 	}
 
 	dr := i.adjustedBounds()
-	hint := restorable.HintNone
-	if overwritesDstRegion(options.Blend, dr, geoM, sx0, sy0, sx1, sy1) {
-		hint = restorable.HintOverwriteDstRegion
-	}
-
 	skipMipmap := options.DisableMipmaps
 	if !skipMipmap {
 		skipMipmap = canSkipMipmap(det, filter)
 	}
-	i.image.DrawTriangles(srcs, vs, is, blend, dr, [graphics.ShaderSrcImageCount]image.Rectangle{img.adjustedBounds()}, shader.shader, i.tmpUniforms, graphicsdriver.FillRuleFillAll, skipMipmap, false, hint)
-}
-
-// overwritesDstRegion reports whether the given parameters overwrite the destination region completely.
-func overwritesDstRegion(blend Blend, dstRegion image.Rectangle, geoM GeoM, sx0, sy0, sx1, sy1 int) bool {
-	// TODO: More precisely, BlendFactorDestinationRGB, BlendFactorDestinationAlpha, and operations should be checked.
-	if blend != BlendCopy && blend != BlendClear {
-		return false
-	}
-	// Check the result vertices is not a rotated rectangle.
-	if geoM.b != 0 || geoM.c != 0 {
-		return false
-	}
-	// Check the result vertices completely covers dstRegion.
-	x0, y0 := geoM.Apply(float64(sx0), float64(sy0))
-	x1, y1 := geoM.Apply(float64(sx1), float64(sy1))
-	if float64(dstRegion.Min.X) < x0 || float64(dstRegion.Min.Y) < y0 || float64(dstRegion.Max.X) > x1 || float64(dstRegion.Max.Y) > y1 {
-		return false
-	}
-	return true
+	i.image.DrawTriangles(srcs, vs, is, blend, dr, [graphics.ShaderSrcImageCount]image.Rectangle{img.adjustedBounds()}, shader.shader, i.tmpUniforms, skipMipmap)
 }
 
 // Vertex represents a vertex passed to DrawTriangles.
@@ -428,19 +427,19 @@ const (
 	// FillRuleFillAll indicates all the triangles are rendered regardless of overlaps.
 	//
 	// Deprecated: as of v2.9.
-	FillRuleFillAll FillRule = FillRule(graphicsdriver.FillRuleFillAll)
+	FillRuleFillAll FillRule = iota
 
 	// FillRuleNonZero means that triangles are rendered based on the non-zero rule.
 	// If and only if the number of overlaps is not 0, the region is rendered.
 	//
 	// Deprecated: as of v2.9.
-	FillRuleNonZero FillRule = FillRule(graphicsdriver.FillRuleNonZero)
+	FillRuleNonZero
 
 	// FillRuleEvenOdd means that triangles are rendered based on the even-odd rule.
 	// If and only if the number of overlaps is odd, the region is rendered.
 	//
 	// Deprecated: as of v2.9.
-	FillRuleEvenOdd FillRule = FillRule(graphicsdriver.FillRuleEvenOdd)
+	FillRuleEvenOdd
 )
 
 const (
@@ -525,7 +524,7 @@ type DrawTrianglesOptions struct {
 	// AntiAlias increases internal draw calls and might affect performance.
 	// Use the build tag `ebitenginedebug` to check the number of draw calls if you care.
 	//
-	// The default (zero) value is false.//
+	// The default (zero) value is false.
 	//
 	// Deprecated: as of v2.9. Use [github.com/hajimehoshi/ebiten/v2/vector.FillPath] instead.
 	AntiAlias bool
@@ -579,7 +578,7 @@ const MaxVertexCount = graphicscommand.MaxVertexCount
 //
 // When the given image is disposed, DrawTriangles panics.
 //
-// When the image i is disposed, DrawTriangles does nothing.
+// When the image i is disposed and the given image is not, DrawTriangles does nothing.
 func (i *Image) DrawTriangles(vertices []Vertex, indices []uint16, img *Image, options *DrawTrianglesOptions) {
 	is := i.ensureTmpIndices(len(indices))
 	for i := range is {
@@ -609,7 +608,7 @@ func (i *Image) DrawTriangles(vertices []Vertex, indices []uint16, img *Image, o
 //
 // When the given image is disposed, DrawTriangles32 panics.
 //
-// When the image i is disposed, DrawTriangles32 does nothing.
+// When the image i is disposed and the given image is not, DrawTriangles32 does nothing.
 func (i *Image) DrawTriangles32(vertices []Vertex, indices []uint32, img *Image, options *DrawTrianglesOptions) {
 	i.copyCheck()
 
@@ -621,6 +620,11 @@ func (i *Image) DrawTriangles32(vertices []Vertex, indices []uint32, img *Image,
 	}
 
 	if len(indices) == 0 {
+		return
+	}
+
+	if options != nil && (options.FillRule != FillRuleFillAll || options.AntiAlias) && !i.Bounds().Empty() {
+		drawTrianglesWithStencilBuffer(i, vertices, indices, img, options)
 		return
 	}
 
@@ -638,7 +642,7 @@ func (i *Image) DrawTriangles32(vertices []Vertex, indices []uint32, img *Image,
 		panic("ebiten: len(indices) % 3 must be 0")
 	}
 	for i, idx := range indices {
-		if int(idx) >= len(vertices) {
+		if idx >= uint32(len(vertices)) {
 			panic(fmt.Sprintf("ebiten: indices[%d] must be less than len(vertices) (%d) but was %d", i, len(vertices), idx))
 		}
 	}
@@ -705,8 +709,8 @@ func (i *Image) DrawTriangles32(vertices []Vertex, indices []uint32, img *Image,
 		var translation [4]float32
 		colorm.Elements(body[:], translation[:])
 		i.tmpUniforms = shader.appendUniforms(i.tmpUniforms, map[string]any{
-			builtinshader.UniformColorMBody:        body[:],
-			builtinshader.UniformColorMTranslation: translation[:],
+			colormshader.UniformColorMBody:        body[:],
+			colormshader.UniformColorMTranslation: translation[:],
 		})
 	}
 
@@ -714,7 +718,7 @@ func (i *Image) DrawTriangles32(vertices []Vertex, indices []uint32, img *Image,
 	if !skipMipmap {
 		skipMipmap = filter != builtinshader.FilterLinear
 	}
-	i.image.DrawTriangles(srcs, vs, indices, blend, i.adjustedBounds(), [graphics.ShaderSrcImageCount]image.Rectangle{img.adjustedBounds()}, shader.shader, i.tmpUniforms, graphicsdriver.FillRule(options.FillRule), skipMipmap, options.AntiAlias, restorable.HintNone)
+	i.image.DrawTriangles(srcs, vs, indices, blend, i.adjustedBounds(), [graphics.ShaderSrcImageCount]image.Rectangle{img.adjustedBounds()}, shader.shader, i.tmpUniforms, skipMipmap)
 }
 
 // DrawTrianglesShaderOptions represents options for DrawTrianglesShader.
@@ -777,8 +781,9 @@ var _ [len(DrawTrianglesShaderOptions{}.Images) - graphics.ShaderSrcImageCount]s
 //
 // For the details about the shader, see https://ebitengine.org/en/documents/shader.html.
 //
-// If the shader unit is texels, one of the specified image is non-nil and its size is different from (width, height),
-// DrawTrianglesShader panics.
+// If the shader unit is texels, DrawTrianglesShader panics when a non-nil image's size is different from
+// the size of the image at index 0 of the specified images.
+// If the image at index 0 is nil, its size is treated as (0, 0) for this comparison.
 // If one of the specified image is non-nil and is disposed, DrawTrianglesShader panics.
 //
 // If len(vertices) is more than MaxVertexCount, the exceeding part is ignored.
@@ -787,6 +792,8 @@ var _ [len(DrawTrianglesShaderOptions{}.Images) - graphics.ShaderSrcImageCount]s
 //
 // If a value in indices is out of range of vertices, or not less than MaxVertexCount, DrawTrianglesShader panics.
 //
+// When the given shader is disposed, DrawTrianglesShader panics.
+//
 // When a specified image is non-nil and is disposed, DrawTrianglesShader panics.
 //
 // If a specified uniform variable's length or type doesn't match with an expected one, DrawTrianglesShader panics.
@@ -794,7 +801,7 @@ var _ [len(DrawTrianglesShaderOptions{}.Images) - graphics.ShaderSrcImageCount]s
 // Even if a result is an invalid color as a premultiplied-alpha color, i.e. an alpha value exceeds other color values,
 // the value is kept and is not clamped.
 //
-// When the image i is disposed, DrawTrianglesShader does nothing.
+// When the image i is disposed and no disposed shader or image is given, DrawTrianglesShader does nothing.
 func (i *Image) DrawTrianglesShader(vertices []Vertex, indices []uint16, shader *Shader, options *DrawTrianglesShaderOptions) {
 	is := i.ensureTmpIndices(len(indices))
 	for i := range is {
@@ -810,8 +817,9 @@ func (i *Image) DrawTrianglesShader(vertices []Vertex, indices []uint16, shader 
 //
 // For the details about the shader, see https://ebitengine.org/en/documents/shader.html.
 //
-// If the shader unit is texels, one of the specified image is non-nil and its size is different from (width, height),
-// DrawTrianglesShader32 panics.
+// If the shader unit is texels, DrawTrianglesShader32 panics when a non-nil image's size is different from
+// the size of the image at index 0 of the specified images.
+// If the image at index 0 is nil, its size is treated as (0, 0) for this comparison.
 // If one of the specified image is non-nil and is disposed, DrawTrianglesShader32 panics.
 //
 // If len(vertices) is more than MaxVertexCount, the exceeding part is ignored.
@@ -820,6 +828,8 @@ func (i *Image) DrawTrianglesShader(vertices []Vertex, indices []uint16, shader 
 //
 // If a value in indices is out of range of vertices, or not less than MaxVertexCount, DrawTrianglesShader32 panics.
 //
+// When the given shader is disposed, DrawTrianglesShader32 panics.
+//
 // When a specified image is non-nil and is disposed, DrawTrianglesShader32 panics.
 //
 // If a specified uniform variable's length or type doesn't match with an expected one, DrawTrianglesShader32 panics.
@@ -827,19 +837,35 @@ func (i *Image) DrawTrianglesShader(vertices []Vertex, indices []uint16, shader 
 // Even if a result is an invalid color as a premultiplied-alpha color, i.e. an alpha value exceeds other color values,
 // the value is kept and is not clamped.
 //
-// When the image i is disposed, DrawTrianglesShader32 does nothing.
+// When the image i is disposed and no disposed shader or image is given, DrawTrianglesShader32 does nothing.
 func (i *Image) DrawTrianglesShader32(vertices []Vertex, indices []uint32, shader *Shader, options *DrawTrianglesShaderOptions) {
 	i.copyCheck()
-
-	if i.isDisposed() {
-		return
-	}
 
 	if shader.isDisposed() {
 		panic("ebiten: the given shader to DrawTrianglesShader must not be disposed")
 	}
 
+	if options != nil {
+		for _, img := range options.Images {
+			if img == nil {
+				continue
+			}
+			if img.isDisposed() {
+				panic("ebiten: the given image to DrawTrianglesShader must not be disposed")
+			}
+		}
+	}
+
+	if i.isDisposed() {
+		return
+	}
+
 	if len(indices) == 0 {
+		return
+	}
+
+	if options != nil && (options.FillRule != FillRuleFillAll || options.AntiAlias) && !i.Bounds().Empty() {
+		drawTrianglesShaderWithStencilBuffer(i, vertices, indices, shader, options)
 		return
 	}
 
@@ -871,7 +897,7 @@ func (i *Image) DrawTrianglesShader32(vertices []Vertex, indices []uint32, shade
 		panic("ebiten: len(indices) % 3 must be 0")
 	}
 	for i, idx := range indices {
-		if int(idx) >= len(vertices) {
+		if idx >= uint32(len(vertices)) {
 			panic(fmt.Sprintf("ebiten: indices[%d] must be less than len(vertices) (%d) but was %d", i, len(vertices), idx))
 		}
 	}
@@ -919,16 +945,13 @@ func (i *Image) DrawTrianglesShader32(vertices []Vertex, indices []uint32, shade
 		if img == nil {
 			continue
 		}
-		if img.isDisposed() {
-			panic("ebiten: the given image to DrawTrianglesShader must not be disposed")
-		}
-		if shader.unit == shaderir.Texels {
+		if shader.unitIsTexels() {
 			if i == 0 {
 				imgSize = img.Bounds().Size()
 			} else {
 				// TODO: Check imgw > 0 && imgh > 0
 				if img.Bounds().Size() != imgSize {
-					panic("ebiten: all the source images must be the same size with the rectangle")
+					panic("ebiten: all the source images must be the same size")
 				}
 			}
 		}
@@ -946,7 +969,7 @@ func (i *Image) DrawTrianglesShader32(vertices []Vertex, indices []uint32, shade
 	i.tmpUniforms = i.tmpUniforms[:0]
 	i.tmpUniforms = shader.appendUniforms(i.tmpUniforms, options.Uniforms)
 
-	i.image.DrawTriangles(imgs, vs, indices, blend, i.adjustedBounds(), srcRegions, shader.shader, i.tmpUniforms, graphicsdriver.FillRule(options.FillRule), true, options.AntiAlias, restorable.HintNone)
+	i.image.DrawTriangles(imgs, vs, indices, blend, i.adjustedBounds(), srcRegions, shader.shader, i.tmpUniforms, true)
 }
 
 // DrawRectShaderOptions represents options for DrawRectShader.
@@ -993,16 +1016,17 @@ var _ [len(DrawRectShaderOptions{}.Images)]struct{} = [graphics.ShaderSrcImageCo
 //
 // For the details about the shader, see https://ebitengine.org/en/documents/shader.html.
 //
+// When the given shader is disposed, DrawRectShader panics.
 // When one of the specified image is non-nil and its size is different from (width, height), DrawRectShader panics.
 // When one of the specified image is non-nil and is disposed, DrawRectShader panics.
 //
 // If a specified uniform variable's length or type doesn't match with an expected one, DrawRectShader panics.
 //
-// In a shader, srcPos in Fragment represents a position in a source image.
-// If no source images are specified, srcPos represents the position from (0, 0) to (width, height) in pixels.
-// If the unit is pixels by a compiler directive `//kage:unit pixelss`, srcPos values are valid.
-// If the unit is texels (default), srcPos values still take from (0, 0) to (width, height),
-// but these are invalid since srcPos is expected to be in texels in the texel-unit mode.
+// In a shader, src0Pos in Fragment represents a position in a source image.
+// If no source images are specified, src0Pos represents the position from (0, 0) to (width, height) in pixels.
+// If the unit is pixels by a compiler directive `//kage:unit pixels`, src0Pos values are valid.
+// If the unit is texels (default), src0Pos values still take from (0, 0) to (width, height),
+// but these are invalid since src0Pos is expected to be in texels in the texel-unit mode.
 // This behavior is preserved for backward compatibility. It is recommended to use the pixel-unit mode to avoid confusion.
 //
 // If no source images are specified, imageSrc0Size returns a valid size only when the unit is pixels,
@@ -1011,16 +1035,27 @@ var _ [len(DrawRectShaderOptions{}.Images)]struct{} = [graphics.ShaderSrcImageCo
 // Even if a result is an invalid color as a premultiplied-alpha color, i.e. an alpha value exceeds other color values,
 // the value is kept and is not clamped.
 //
-// When the image i is disposed, DrawRectShader does nothing.
+// When the image i is disposed and no disposed shader or image is given, DrawRectShader does nothing.
 func (i *Image) DrawRectShader(width, height int, shader *Shader, options *DrawRectShaderOptions) {
 	i.copyCheck()
 
-	if i.isDisposed() {
-		return
-	}
-
 	if shader.isDisposed() {
 		panic("ebiten: the given shader to DrawRectShader must not be disposed")
+	}
+
+	if options != nil {
+		for _, img := range options.Images {
+			if img == nil {
+				continue
+			}
+			if img.isDisposed() {
+				panic("ebiten: the given image to DrawRectShader must not be disposed")
+			}
+		}
+	}
+
+	if i.isDisposed() {
+		return
 	}
 
 	if options != nil {
@@ -1059,9 +1094,6 @@ func (i *Image) DrawRectShader(width, height int, shader *Shader, options *DrawR
 		if img == nil {
 			continue
 		}
-		if img.isDisposed() {
-			panic("ebiten: the given image to DrawRectShader must not be disposed")
-		}
 		if img.Bounds().Size() != image.Pt(width, height) {
 			panic("ebiten: all the source images must be the same size with the rectangle")
 		}
@@ -1071,7 +1103,7 @@ func (i *Image) DrawRectShader(width, height int, shader *Shader, options *DrawR
 	var srcRegions [graphics.ShaderSrcImageCount]image.Rectangle
 	for i, img := range options.Images {
 		if img == nil {
-			if shader.unit == shaderir.Pixels && i == 0 {
+			if !shader.unitIsTexels() && i == 0 {
 				// Give the source size as pixels only when the unit is pixels so that users can get the source size via imageSrc0Size (#2166).
 				// With the texel mode, the imageSrc0Origin and imageSrc0Size values should be in texels so the source position in pixels would not match.
 				srcRegions[i] = image.Rect(0, 0, width, height)
@@ -1103,13 +1135,8 @@ func (i *Image) DrawRectShader(width, height int, shader *Shader, options *DrawR
 	i.tmpUniforms = shader.appendUniforms(i.tmpUniforms, options.Uniforms)
 
 	dr := i.adjustedBounds()
-	hint := restorable.HintNone
-	// Do not use srcRegions[0].Dx() and srcRegions[0].Dy() as these might be empty.
-	if overwritesDstRegion(options.Blend, dr, geoM, srcRegions[0].Min.X, srcRegions[0].Min.Y, srcRegions[0].Min.X+width, srcRegions[0].Min.Y+height) {
-		hint = restorable.HintOverwriteDstRegion
-	}
 
-	i.image.DrawTriangles(imgs, vs, is, blend, dr, srcRegions, shader.shader, i.tmpUniforms, graphicsdriver.FillRuleFillAll, true, false, hint)
+	i.image.DrawTriangles(imgs, vs, is, blend, dr, srcRegions, shader.shader, i.tmpUniforms, true)
 }
 
 // SubImage returns an image representing the portion of the image p visible through r.
@@ -1165,11 +1192,10 @@ func (i *Image) SubImage(r image.Rectangle) image.Image {
 		}
 	}
 
-	img := &Image{
-		image:    i.image,
-		bounds:   r,
-		original: i,
-	}
+	img := &Image{}
+	img.image = i.image
+	img.bounds = r
+	img.original = i
 	img.addr = img
 
 	if i.subImageCache == nil {
@@ -1177,6 +1203,42 @@ func (i *Image) SubImage(r image.Rectangle) image.Image {
 	}
 	i.subImageCache[r] = img
 	img.updateAccessTime()
+
+	return img
+}
+
+// RecyclableSubImage returns a sub-image of the image from a global pool.
+// The returned sub-image can be returned to the pool by calling [Image.Recycle].
+//
+// RecyclableSubImage is useful when you need to create many sub-images with different bounds,
+// and want to avoid repeated allocations.
+//
+// Unlike [Image.SubImage], the returned sub-image is not cached internally.
+// The caller is responsible for managing the lifecycle of the returned image.
+//
+// If the image is disposed, RecyclableSubImage panics.
+func (i *Image) RecyclableSubImage(r image.Rectangle) *Image {
+	i.copyCheck()
+	if i.isDisposed() {
+		panic("ebiten: the image is already disposed")
+	}
+
+	if i.isSubImage() {
+		return i.original.RecyclableSubImage(r.Intersect(i.Bounds()))
+	}
+
+	r = r.Intersect(i.Bounds())
+	// Need to check Empty explicitly. See the standard image package implementations.
+	if r.Empty() {
+		r = image.Rectangle{}
+	}
+
+	img := theImagePool.Get().(*Image)
+	img.image = i.image
+	img.bounds = r
+	img.original = i
+	img.addr = img
+	img.recyclable = true
 
 	return img
 }
@@ -1204,7 +1266,7 @@ func (i *Image) ColorModel() color.Model {
 //
 // ReadPixels loads pixels from GPU to system memory if necessary, which means that ReadPixels can be slow.
 //
-// ReadPixels always sets a transparent color if the image is disposed.
+// ReadPixels panics if the image is disposed.
 //
 // len(pixels) must be 4 * (bounds width) * (bounds height).
 // If len(pixels) is not correct, ReadPixels panics.
@@ -1219,13 +1281,6 @@ func (i *Image) ReadPixels(pixels []byte) {
 	b := i.Bounds()
 	if got, want := len(pixels), 4*b.Dx()*b.Dy(); got != want {
 		panic(fmt.Sprintf("ebiten: len(pixels) must be %d but %d at ReadPixels", want, got))
-	}
-
-	if i.isDisposed() {
-		for i := range pixels {
-			pixels[i] = 0
-		}
-		return
 	}
 
 	i.invokeUsageCallbacks()
@@ -1336,6 +1391,7 @@ func (i *Image) Dispose() {
 	if i.isSubImage() {
 		return
 	}
+	i.invokeUsageCallbacks()
 	i.image.Deallocate()
 	i.image = nil
 	i.subImageCacheM.Lock()
@@ -1364,8 +1420,37 @@ func (i *Image) Deallocate() {
 	if i.isSubImage() {
 		return
 	}
+	i.invokeUsageCallbacks()
 	i.image.Deallocate()
 	i.usageCallbacks = nil
+}
+
+// Recycle puts the Image struct back into a global pool for reuse, reducing allocations.
+// After Recycle is called, the image must not be used; the behavior is undefined.
+//
+// Recycle can only be called on images created by [Image.RecyclableSubImage].
+// Calling Recycle on any other image causes a panic.
+func (i *Image) Recycle() {
+	i.copyCheck()
+	if !i.recyclable {
+		panic("ebiten: Recycle can only be called on an image created by RecyclableSubImage")
+	}
+
+	// Clear all fields to release references and reset state.
+	i.addr = nil
+	i.image = nil
+	i.original = nil
+	i.bounds = image.Rectangle{}
+	i.tmpVertices = i.tmpVertices[:0]
+	i.tmpIndices = i.tmpIndices[:0]
+	i.tmpUniforms = i.tmpUniforms[:0]
+	clear(i.subImageCache)
+	i.subImageGCLastTick = 0
+	i.atime.Store(0)
+	clear(i.usageCallbacks)
+	i.recyclable = false
+
+	theImagePool.Put(i)
 }
 
 // WritePixels replaces the pixels of the image.
@@ -1403,9 +1488,17 @@ func (i *Image) ReplacePixels(pixels []byte) {
 	i.WritePixels(pixels)
 }
 
+// MaxImageSize returns the device-dependent maximum width and height of an image in pixels.
+//
+// MaxImageSize returns 0 before the game starts.
+func MaxImageSize() int {
+	return atlas.MaxImageSize()
+}
+
 // NewImage returns an empty image.
 //
-// If width or height is less than 1 or more than device-dependent maximum size, NewImage panics.
+// If width or height is less than 1, NewImage panics.
+// If width or height is more than [MaxImageSize], NewImage panics when the image is used.
 //
 // NewImage should be called only when necessary.
 // For example, you should avoid to call NewImage every Update or Draw call.
@@ -1429,7 +1522,8 @@ type NewImageOptions struct {
 
 // NewImageWithOptions returns an empty image with the given bounds and the options.
 //
-// If width or height is less than 1 or more than device-dependent maximum size, NewImageWithOptions panics.
+// If width or height is less than 1, NewImageWithOptions panics.
+// If width or height is more than [MaxImageSize], NewImageWithOptions panics when the image is used.
 //
 // The rendering origin position is (0, 0) of the given bounds.
 // If DrawImage is called on a new image created by NewImageOptions,
@@ -1463,17 +1557,17 @@ func newImage(bounds image.Rectangle, imageType atlas.ImageType) *Image {
 		panic(fmt.Sprintf("ebiten: height at NewImage must be positive but %d", height))
 	}
 
-	i := &Image{
-		image:  ui.Get().NewImage(width, height, imageType),
-		bounds: bounds,
-	}
+	i := &Image{}
+	i.image = ui.Get().NewImage(width, height, imageType)
+	i.bounds = bounds
 	i.addr = i
 	return i
 }
 
 // NewImageFromImage creates a new image with the given image (source).
 //
-// If source's width or height is less than 1 or more than device-dependent maximum size, NewImageFromImage panics.
+// If source's width or height is less than 1, NewImageFromImage panics.
+// If source's width or height is more than [MaxImageSize], NewImageFromImage panics when the image is used.
 //
 // NewImageFromImage should be called only when necessary.
 // For example, you should avoid to call NewImageFromImage every Update or Draw call.
@@ -1503,7 +1597,8 @@ type NewImageFromImageOptions struct {
 
 // NewImageFromImageWithOptions creates a new image with the given image (source) with the given options.
 //
-// If source's width or height is less than 1 or more than device-dependent maximum size, NewImageFromImageWithOptions panics.
+// If source's width or height is less than 1, NewImageFromImageWithOptions panics.
+// If source's width or height is more than [MaxImageSize], NewImageFromImageWithOptions panics when the image is used.
 //
 // If options is nil, the default setting is used.
 //
@@ -1540,7 +1635,7 @@ func NewImageFromImageWithOptions(source image.Image, options *NewImageFromImage
 		return i
 	}
 
-	i.WritePixels(imageToBytes(source))
+	i.WritePixels(imageToBytes(source, true))
 	return i
 }
 

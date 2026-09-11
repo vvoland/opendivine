@@ -15,14 +15,12 @@
 package shader
 
 import (
-	"bufio"
-	"bytes"
 	"fmt"
 	"go/ast"
 	gconstant "go/constant"
 	"go/parser"
 	"go/token"
-	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/hajimehoshi/ebiten/v2/internal/shaderir"
@@ -51,7 +49,9 @@ type compileState struct {
 
 	vertexEntry   string
 	fragmentEntry string
-	unit          shaderir.Unit
+
+	vertexEntryPos   token.Pos
+	fragmentEntryPos token.Pos
 
 	ir shaderir.Program
 
@@ -59,7 +59,12 @@ type compileState struct {
 
 	global block
 
-	errs []string
+	errs []compileError
+}
+
+type compileError struct {
+	position token.Position
+	message  string
 }
 
 func (cs *compileState) findFunction(name string) (int, bool) {
@@ -124,7 +129,7 @@ func (b *block) findLocalVariable(name string, markLocalVariableUsed bool) (int,
 		panic("shader: variable name must be non-empty and non-underscore")
 	}
 
-	idx := 0
+	var idx int
 	for outer := b.outer; outer != nil; outer = outer.outer {
 		idx += len(outer.vars)
 	}
@@ -147,12 +152,12 @@ func (b *block) findLocalVariableByIndex(idx int) (shaderir.Type, bool) {
 	for outer := b.outer; outer != nil; outer = outer.outer {
 		bs = append(bs, outer)
 	}
-	for i := len(bs) - 1; i >= 0; i-- {
-		if len(bs[i].vars) <= idx {
-			idx -= len(bs[i].vars)
+	for _, b := range slices.Backward(bs) {
+		if len(b.vars) <= idx {
+			idx -= len(b.vars)
 			continue
 		}
-		return bs[i].vars[idx].typ, true
+		return b.vars[idx].typ, true
 	}
 	return shaderir.Type{}, false
 }
@@ -175,19 +180,27 @@ func (b *block) findConstant(name string) (constant, bool) {
 }
 
 type ParseError struct {
-	errs []string
+	errs []compileError
 }
 
 func (p *ParseError) Error() string {
-	return strings.Join(p.errs, "\n")
+	msgs := make([]string, 0, len(p.errs))
+	for _, e := range p.errs {
+		msgs = append(msgs, fmt.Sprintf("%s: %s", e.position, e.message))
+	}
+	return strings.Join(msgs, "\n")
+}
+
+// Positions returns the source positions of the errors, in the same order as [ParseError.Error] reports them.
+func (p *ParseError) Positions() []token.Position {
+	ps := make([]token.Position, 0, len(p.errs))
+	for _, e := range p.errs {
+		ps = append(ps, e.position)
+	}
+	return ps
 }
 
 func Compile(src []byte, vertexEntry, fragmentEntry string, textureCount int) (*shaderir.Program, error) {
-	unit, err := ParseCompilerDirectives(src)
-	if err != nil {
-		return nil, err
-	}
-
 	fs := token.NewFileSet()
 	f, err := parser.ParseFile(fs, "", src, parser.AllErrors)
 	if err != nil {
@@ -198,9 +211,8 @@ func Compile(src []byte, vertexEntry, fragmentEntry string, textureCount int) (*
 		fs:            fs,
 		vertexEntry:   vertexEntry,
 		fragmentEntry: fragmentEntry,
-		unit:          unit,
 	}
-	s.ir.SourceHash = shaderir.CalcSourceHash(src)
+	s.ir.SourceID = shaderir.CalcSourceID(src)
 	s.global.ir = &shaderir.Block{}
 	s.parse(f)
 
@@ -217,47 +229,14 @@ func Compile(src []byte, vertexEntry, fragmentEntry string, textureCount int) (*
 	return &s.ir, nil
 }
 
-func ParseCompilerDirectives(src []byte) (shaderir.Unit, error) {
-	// TODO: Change the unit to pixels in v3 (#2645).
-	unit := shaderir.Texels
-
-	// Go's whitespace is U+0020 (SP), U+0009 (\t), U+000d (\r), and U+000A (\n).
-	// See https://go.dev/ref/spec#Tokens
-	reUnit := regexp.MustCompile(`^[ \t\r\n]*//kage:unit\s+([^ \t\r\n]+)[ \t\r\n]*$`)
-	var unitParsed bool
-
-	buf := bytes.NewBuffer(src)
-	s := bufio.NewScanner(buf)
-	for s.Scan() {
-		m := reUnit.FindStringSubmatch(s.Text())
-		if m == nil {
-			continue
-		}
-		if unitParsed {
-			return 0, fmt.Errorf("shader: at most one //kage:unit can exist in a shader")
-		}
-		switch m[1] {
-		case "pixels":
-			unit = shaderir.Pixels
-		case "texels":
-			unit = shaderir.Texels
-		default:
-			return 0, fmt.Errorf("shader: invalid value for //kage:unit: %s", m[1])
-		}
-		unitParsed = true
-	}
-
-	return unit, nil
-}
-
 func (s *compileState) addError(pos token.Pos, str string) {
-	p := s.fs.Position(pos)
-	s.errs = append(s.errs, fmt.Sprintf("%s: %s", p, str))
+	s.errs = append(s.errs, compileError{
+		position: s.fs.Position(pos),
+		message:  str,
+	})
 }
 
 func (cs *compileState) parse(f *ast.File) {
-	cs.ir.Unit = cs.unit
-
 	// Parse GenDecl for global variables, and then parse functions.
 	for _, d := range f.Decls {
 		if _, ok := d.(*ast.FuncDecl); !ok {
@@ -278,7 +257,7 @@ func (cs *compileState) parse(f *ast.File) {
 			utypes = append(utypes, cs.ir.Uniforms[i])
 		}
 	}
-	// TODO: Check len(unames) == graphics.PreservedUniformVariablesNum. Unfortunately this is not true on tests.
+	// TODO: Check len(unames) == graphics.PreservedUniformVariablesCount. Unfortunately this is not true on tests.
 	for i, u := range cs.ir.UniformNames {
 		if !strings.HasPrefix(u, "__") {
 			unames = append(unames, u)
@@ -312,11 +291,13 @@ func (cs *compileState) parse(f *ast.File) {
 		inParams, outParams, ret := cs.parseFuncParams(&cs.global, n, fd)
 
 		if n == cs.vertexEntry {
+			cs.vertexEntryPos = d.Pos()
 			vertexInParams = inParams
 			vertexOutParams = outParams
 			continue
 		}
 		if n == cs.fragmentEntry {
+			cs.fragmentEntryPos = d.Pos()
 			fragmentInParams = inParams
 			fragmentOutParams = outParams
 			fragmentReturnType = ret
@@ -352,16 +333,19 @@ func (cs *compileState) parse(f *ast.File) {
 			t := fragmentInParams[i].typ
 			if !p.typ.Equal(&t) {
 				name := fragmentInParams[i].name
-				cs.addError(0, fmt.Sprintf("fragment argument %s must be %s but was %s", name, p.typ.String(), t.String()))
+				cs.addError(cs.fragmentEntryPos, fmt.Sprintf("fragment argument %s must be %s but was %s", name, p.typ.String(), t.String()))
 			}
+		}
+		if len(fragmentInParams) > len(vertexOutParams) {
+			cs.addError(cs.fragmentEntryPos, fmt.Sprintf("the number of the fragment arguments (%d) must not be greater than the number of the vertex returning values (%d)", len(fragmentInParams), len(vertexOutParams)))
 		}
 
 		// The first out-param is treated as gl_Position in GLSL.
 		if vertexOutParams[0].typ.Main != shaderir.Vec4 {
-			cs.addError(0, "vertex entry point must have at least one returning vec4 value for a position")
+			cs.addError(cs.vertexEntryPos, "vertex entry point must have at least one returning vec4 value for a position")
 		}
 		if len(fragmentOutParams) != 0 || fragmentReturnType.Main != shaderir.Vec4 {
-			cs.addError(0, "fragment entry point must have one returning vec4 value for a color")
+			cs.addError(cs.fragmentEntryPos, "fragment entry point must have one returning vec4 value for a color")
 		}
 	}
 
@@ -369,7 +353,7 @@ func (cs *compileState) parse(f *ast.File) {
 		return
 	}
 
-	// Set attribute and varying veraibles.
+	// Set attribute and varying variables.
 	for _, p := range vertexInParams {
 		cs.ir.Attributes = append(cs.ir.Attributes, p.typ)
 	}
@@ -605,6 +589,10 @@ func (s *compileState) parseVariable(block *block, fname string, vs *ast.ValueSp
 				if len(ts) > 1 {
 					s.addError(vs.Pos(), "the numbers of lhs and rhs don't match")
 				}
+				if len(ts) == 0 {
+					s.addError(vs.Pos(), "the right-hand side of the variable declaration has no value")
+					return nil, nil, nil, false
+				}
 				t = ts[0]
 				if t.Main == shaderir.None {
 					t = toDefaultType(es[0].Const)
@@ -831,7 +819,7 @@ func (cs *compileState) parseFunc(block *block, d *ast.FuncDecl) (function, bool
 		if diff := len(cs.ir.Varyings) - (len(inParams) - 1); diff > 0 {
 			// inParams is not enough when the vertex shader has more returning values than the fragment shader's arguments.
 			orig := len(inParams) - 1
-			for i := 0; i < diff; i++ {
+			for i := range diff {
 				inParams = append(inParams, variable{
 					name: "_",
 					typ:  cs.ir.Varyings[orig+i],

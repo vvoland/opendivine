@@ -17,18 +17,48 @@ package graphics
 import (
 	"bytes"
 	"fmt"
+	"io"
+	"regexp"
 
 	"github.com/hajimehoshi/ebiten/v2/internal/shader"
 	"github.com/hajimehoshi/ebiten/v2/internal/shaderir"
 )
 
-func shaderSuffix(unit shaderir.Unit) (string, error) {
-	shaderSuffix := fmt.Sprintf(`
+// Go's whitespace is U+0020 (SP), U+0009 (\t), U+000d (\r), and U+000A (\n).
+// See https://go.dev/ref/spec#Tokens
+var reUnit = regexp.MustCompile(`^[ \t\r\n]*//kage:unit\s+([^ \t\r\n]+)[ \t\r\n]*$`)
+
+// ParseKageUnitDirective returns the value of the //kage:unit directive in src, or an empty string if
+// the directive is absent. A duplicated directive is an error.
+func ParseKageUnitDirective(src []byte) (string, error) {
+	var value string
+	var parsed bool
+
+	for line := range bytes.Lines(src) {
+		m := reUnit.FindSubmatch(line)
+		if m == nil {
+			continue
+		}
+		if parsed {
+			return "", fmt.Errorf("graphics: at most one //kage:unit can exist in a shader")
+		}
+		value = string(m[1])
+		parsed = true
+	}
+
+	return value, nil
+}
+
+// writeShaderBridge writes to w the Kage source appended to a user's fragment shader, bridging the user's
+// builtin functions to the engine's __-prefixed uniforms and textures. The bridge operates in the pixel
+// unit: the region uniforms hold pixels, and __texelAt fetches a texel by its integer pixel coordinates.
+func writeShaderBridge(w io.Writer) error {
+	if _, err := fmt.Fprintf(w, `
 var __imageDstTextureSize vec2
 
 // imageDstTextureSize returns the destination image's texture size in pixels.
 //
-// Deprecated: as of v2.6. Use the pixel-unit mode.
+// As an image is a part of internal texture, the texture is usually bigger than the image.
 func imageDstTextureSize() vec2 {
 	return __imageDstTextureSize
 }
@@ -36,22 +66,24 @@ func imageDstTextureSize() vec2 {
 var __imageSrcTextureSizes [%[1]d]vec2
 
 // imageSrcTextureSize returns the 0th source image's texture size in pixels.
-// As an image is a part of internal texture, the texture is usually bigger than the image.
-// The texture's size is useful when you want to calculate pixels from texels in the texel mode.
 //
-// Deprecated: as of v2.6. Use the pixel-unit mode.
+// Deprecated: as of v2.6. Use imageSrc0TextureSize instead.
 func imageSrcTextureSize() vec2 {
 	return __imageSrcTextureSizes[0]
 }
+`, ShaderSrcImageCount); err != nil {
+		return err
+	}
 
+	if _, err := io.WriteString(w, `
 // The unit is the destination texture's pixel or texel.
 var __imageDstRegionOrigin vec2
 
-// The unit is the source texture's pixel or texel.
+// The unit is the destination texture's pixel or texel.
 var __imageDstRegionSize vec2
 
 // imageDstRegionOnTexture returns the destination image's region (the origin and the size) on its texture.
-// The unit is the source texture's pixel or texel.
+// The unit is the destination texture's pixel or texel.
 //
 // As an image is a part of internal texture, the image can be located at an arbitrary position on the texture.
 //
@@ -61,7 +93,7 @@ func imageDstRegionOnTexture() (vec2, vec2) {
 }
 
 // imageDstOrigin returns the destination image's origin on its texture.
-// The unit is the source texture's pixel or texel.
+// The unit is the destination texture's pixel or texel.
 //
 // As an image is a part of internal texture, the image can be located at an arbitrary position on the texture.
 func imageDstOrigin() vec2 {
@@ -69,11 +101,15 @@ func imageDstOrigin() vec2 {
 }
 
 // imageDstSize returns the destination image's size.
-// The unit is the source texture's pixel or texel.
+// The unit is the destination texture's pixel or texel.
 func imageDstSize() vec2 {
 	return __imageDstRegionSize
 }
+`); err != nil {
+		return err
+	}
 
+	if _, err := fmt.Fprintf(w, `
 // The unit is the source texture's pixel or texel.
 var __imageSrcRegionOrigins [%[1]d]vec2
 
@@ -89,10 +125,12 @@ var __imageSrcRegionSizes [%[1]d]vec2
 func imageSrcRegionOnTexture() (vec2, vec2) {
 	return __imageSrcRegionOrigins[0], __imageSrcRegionSizes[0]
 }
-`, ShaderSrcImageCount)
+`, ShaderSrcImageCount); err != nil {
+		return err
+	}
 
-	for i := 0; i < ShaderSrcImageCount; i++ {
-		shaderSuffix += fmt.Sprintf(`
+	for i := range ShaderSrcImageCount {
+		if _, err := fmt.Fprintf(w, `
 // imageSrc%[1]dOrigin returns the source image's region origin on its texture.
 // The unit is the source texture's pixel or texel.
 //
@@ -106,89 +144,86 @@ func imageSrc%[1]dOrigin() vec2 {
 func imageSrc%[1]dSize() vec2 {
 	return __imageSrcRegionSizes[%[1]d]
 }
-`, i)
 
-		pos := "pos"
+// imageSrc%[1]dTextureSize returns the source image's texture size in pixels.
+//
+// As an image is a part of internal texture, the texture is usually bigger than the image.
+func imageSrc%[1]dTextureSize() vec2 {
+	return __imageSrcTextureSizes[%[1]d]
+}
+`, i); err != nil {
+			return err
+		}
+
+		// pos is in pixels of the 0th texture. Convert it to the i-th texture's pixels.
+		// The 0th source image needs no conversion, so its functions have no suffix.
+		texPos := "pos"
+		var suffix string
 		if i >= 1 {
-			// Convert the position in texture0's positions to the target texture positions.
-			switch unit {
-			case shaderir.Pixels:
-				pos = fmt.Sprintf("pos - __imageSrcRegionOrigins[0] + __imageSrcRegionOrigins[%d]", i)
-			case shaderir.Texels:
-				pos = fmt.Sprintf("((pos - __imageSrcRegionOrigins[0]) * __imageSrcTextureSizes[0]) / __imageSrcTextureSizes[%[1]d] + __imageSrcRegionOrigins[%[1]d]", i)
-			default:
-				return "", fmt.Errorf("graphics: unexpected unit: %d", unit)
-			}
+			texPos = fmt.Sprintf("pos - __imageSrcRegionOrigins[0] + __imageSrcRegionOrigins[%d]", i)
+			suffix = "FromSrc0Pos"
 		}
 		// __t%d is a special variable for a texture variable.
-		shaderSuffix += fmt.Sprintf(`
-func imageSrc%[1]dUnsafeAt(pos vec2) vec4 {
-	// pos is the position in positions of the source texture (= 0th image's texture).
+		if _, err := fmt.Fprintf(w, `
+// imageSrc%[1]dUnsafeAt%[3]s returns the source image's color at the given position.
+// The position is in the 0th source image's texture.
+// The result is undefined when the position is outside the image.
+func imageSrc%[1]dUnsafeAt%[3]s(pos vec2) vec4 {
 	return __texelAt(__t%[1]d, %[2]s)
 }
-`, i, pos)
-		switch unit {
-		case shaderir.Pixels:
-			shaderSuffix += fmt.Sprintf(`
-func imageSrc%[1]dAt(pos vec2) vec4 {
-	// pos is the position of the source texture (= 0th image's texture).
-	// If pos is in the region, the result is (1, 1). Otherwise, either element is 0.
+
+// imageSrc%[1]dAt%[3]s returns the source image's color at the given position.
+// The position is in the 0th source image's texture.
+// The result is transparent when the position is outside the image.
+func imageSrc%[1]dAt%[3]s(pos vec2) vec4 {
+	// If pos is in the region, in is (1, 1). Otherwise, either element is 0.
 	in := step(__imageSrcRegionOrigins[0], pos) - step(__imageSrcRegionOrigins[0] + __imageSrcRegionSizes[%[1]d], pos)
 	return __texelAt(__t%[1]d, %[2]s) * in.x * in.y
 }
-`, i, pos)
-		case shaderir.Texels:
-			shaderSuffix += fmt.Sprintf(`
-func imageSrc%[1]dAt(pos vec2) vec4 {
-	// pos is the position of the source texture (= 0th image's texture).
-	// If pos is in the region, the result is (1, 1). Otherwise, either element is 0.
-	// With the texel mode, all the source region sizes are the same (#1870).
-	// As pos is in texels of the 0th texture, always use the 0th image region size.
-	in := step(__imageSrcRegionOrigins[0], pos) - step(__imageSrcRegionOrigins[0] + __imageSrcRegionSizes[0], pos)
-	return __texelAt(__t%[1]d, %[2]s) * in.x * in.y
-}
-`, i, pos)
+`, i, texPos, suffix); err != nil {
+			return err
 		}
 	}
 
-	shaderSuffix += `
+	if _, err := io.WriteString(w, `
 var __projectionMatrix mat4
 
 func __vertex(dstPos vec2, srcPos vec2, color vec4, custom vec4) (vec4, vec2, vec4, vec4) {
 	return __projectionMatrix * vec4(dstPos, 0, 1), srcPos, color, custom
 }
-`
-	return shaderSuffix, nil
+`); err != nil {
+		return err
+	}
+
+	return nil
 }
 
-func completeShaderSource(fragmentSrc []byte) ([]byte, error) {
-	unit, err := shader.ParseCompilerDirectives(fragmentSrc)
-	if err != nil {
-		return nil, err
-	}
-	suffix, err := shaderSuffix(unit)
-	if err != nil {
-		return nil, err
-	}
-
+// completeShaderSource returns a complete shader source: the fragment shader source followed by the bridge.
+func completeShaderSource(fragmentSrc []byte) []byte {
 	var buf bytes.Buffer
-	buf.Write(fragmentSrc)
-	buf.WriteString(suffix)
-
-	return buf.Bytes(), nil
+	// Writing to a bytes.Buffer never fails.
+	_, _ = buf.Write(fragmentSrc)
+	_ = writeShaderBridge(&buf)
+	return buf.Bytes()
 }
 
+// CompileShader compiles a pixel-unit fragment shader source into an intermediate representation.
+// The source must select the pixel unit with the `//kage:unit pixels` directive.
+// The returned program's FragmentSource holds the given source.
 func CompileShader(fragmentSrc []byte) (*shaderir.Program, error) {
-	src, err := completeShaderSource(fragmentSrc)
+	value, err := ParseKageUnitDirective(fragmentSrc)
 	if err != nil {
 		return nil, err
+	}
+	if value != "pixels" {
+		return nil, fmt.Errorf("graphics: the `//kage:unit pixels` directive is required")
 	}
 
 	const (
 		vert = "__vertex"
 		frag = "Fragment"
 	)
-	ir, err := shader.Compile(src, vert, frag, ShaderSrcImageCount)
+	ir, err := shader.Compile(completeShaderSource(fragmentSrc), vert, frag, ShaderSrcImageCount)
 	if err != nil {
 		return nil, err
 	}
@@ -200,13 +235,12 @@ func CompileShader(fragmentSrc []byte) (*shaderir.Program, error) {
 		return nil, fmt.Errorf("graphics: fragment shader entry point '%s' is missing", frag)
 	}
 
+	ir.FragmentSource = bytes.Clone(fragmentSrc)
+
 	return ir, nil
 }
 
-func CalcSourceHash(fragmentSrc []byte) (shaderir.SourceHash, error) {
-	src, err := completeShaderSource(fragmentSrc)
-	if err != nil {
-		return shaderir.SourceHash{}, err
-	}
-	return shaderir.CalcSourceHash(src), nil
+// CalcSourceID returns the source ID of a pixel-unit fragment shader source.
+func CalcSourceID(fragmentSrc []byte) shaderir.SourceID {
+	return shaderir.CalcSourceID(completeShaderSource(fragmentSrc))
 }

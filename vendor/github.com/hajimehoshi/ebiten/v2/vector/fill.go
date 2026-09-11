@@ -17,10 +17,164 @@ package vector
 import (
 	"fmt"
 	"image"
+	"runtime"
 	"slices"
+	"sync"
+	_ "unsafe"
+	"weak"
 
 	"github.com/hajimehoshi/ebiten/v2"
 )
+
+// FillRule is the rule whether an overlapped region is rendered or not.
+//
+// The number of overlaps is counted with a limited precision, so a region with too many
+// overlapping triangles can be rendered incorrectly.
+type FillRule int
+
+const (
+	// FillRuleNonZero means that triangles are rendered based on the non-zero rule.
+	// If and only if the number of overlaps is not 0, the region is rendered.
+	FillRuleNonZero FillRule = iota
+
+	// FillRuleEvenOdd means that triangles are rendered based on the even-odd rule.
+	// If and only if the number of overlaps is odd, the region is rendered.
+	FillRuleEvenOdd
+)
+
+var (
+	// theCallbackTokens and theFillPathsStates are keyed by weak pointers not to keep the destination images alive.
+	// When a destination image is collected before being used again, releaseFillPathsState removes the entries.
+	theCallbackTokens      = map[weak.Pointer[ebiten.Image]]int64{}
+	theFillPathsStates     = map[weak.Pointer[ebiten.Image]]*fillPathsState{}
+	theFillPathsStatesPool = sync.Pool{
+		New: func() any {
+			return &fillPathsState{}
+		},
+	}
+	theFillPathM sync.Mutex
+)
+
+// FillOptions is options to fill a path.
+type FillOptions struct {
+	// FillRule is the rule whether an overlapped region is rendered or not.
+	// The default (zero) value is FillRuleNonZero.
+	FillRule FillRule
+}
+
+// DrawPathOptions is options to draw a path.
+type DrawPathOptions struct {
+	// AntiAlias is whether the path is drawn with anti-aliasing.
+	// The default (zero) value is false.
+	AntiAlias bool
+
+	// ColorScale is the color scale to apply to the path.
+	// The default (zero) value is identity, which is (1, 1, 1, 1) (white).
+	ColorScale ebiten.ColorScale
+
+	// Blend is the blend mode to apply to the path.
+	// The default (zero) value is ebiten.BlendSourceOver.
+	Blend ebiten.Blend
+}
+
+// FillPath fills the specified path with the specified options.
+func FillPath(dst *ebiten.Image, path *Path, fillOptions *FillOptions, drawPathOptions *DrawPathOptions) {
+	if drawPathOptions == nil {
+		drawPathOptions = &DrawPathOptions{}
+	}
+	if fillOptions == nil {
+		fillOptions = &FillOptions{}
+	}
+
+	bounds := dst.Bounds()
+
+	// Get the original image if dst is a sub-image to integrate the callbacks.
+	dst = originalImage(dst)
+
+	theFillPathM.Lock()
+	defer theFillPathM.Unlock()
+
+	key := weak.Make(dst)
+
+	// Remove the previous registered callbacks.
+	if token, ok := theCallbackTokens[key]; ok {
+		removeUsageCallback(dst, token)
+	}
+	delete(theCallbackTokens, key)
+
+	s, ok := theFillPathsStates[key]
+	if !ok {
+		s = theFillPathsStatesPool.Get().(*fillPathsState)
+		theFillPathsStates[key] = s
+		s.cleanup = runtime.AddCleanup(dst, releaseFillPathsState, key)
+	}
+	if s.antialias != drawPathOptions.AntiAlias || s.blend != drawPathOptions.Blend || s.fillRule != fillOptions.FillRule {
+		s.fillPaths(dst)
+		s.reset()
+	}
+	s.antialias = drawPathOptions.AntiAlias
+	s.blend = drawPathOptions.Blend
+	s.fillRule = fillOptions.FillRule
+	s.addPath(path, bounds, drawPathOptions.ColorScale)
+
+	// Use an independent callback function to avoid unexpected captures.
+	theCallbackTokens[key] = addUsageCallback(dst, fillPathCallback)
+}
+
+func fillPathCallback(dst *ebiten.Image) {
+	if originalImage(dst) != dst {
+		panic("vector: dst must be the original image")
+	}
+
+	theFillPathM.Lock()
+	defer theFillPathM.Unlock()
+
+	key := weak.Make(dst)
+
+	// Remove the callback not to call this twice.
+	if token, ok := theCallbackTokens[key]; ok {
+		removeUsageCallback(dst, token)
+	}
+	delete(theCallbackTokens, key)
+
+	s, ok := theFillPathsStates[key]
+	if !ok {
+		panic("vector: fillPathsState must exist here")
+	}
+	s.fillPaths(dst)
+	s.reset()
+	delete(theFillPathsStates, key)
+	s.cleanup.Stop()
+	s.cleanup = runtime.Cleanup{}
+	theFillPathsStatesPool.Put(s)
+}
+
+// releaseFillPathsState discards the state for a destination image that was collected before being used again.
+func releaseFillPathsState(key weak.Pointer[ebiten.Image]) {
+	theFillPathM.Lock()
+	defer theFillPathM.Unlock()
+
+	// The destination image is already collected, and its usage callbacks are gone with it.
+	delete(theCallbackTokens, key)
+
+	s, ok := theFillPathsStates[key]
+	if !ok {
+		return
+	}
+	delete(theFillPathsStates, key)
+	s.cleanup = runtime.Cleanup{}
+	s.reset()
+	theFillPathsStatesPool.Put(s)
+}
+
+//go:linkname originalImage github.com/hajimehoshi/ebiten/v2.originalImage
+func originalImage(img *ebiten.Image) *ebiten.Image
+
+//go:linkname addUsageCallback github.com/hajimehoshi/ebiten/v2.addUsageCallback
+func addUsageCallback(img *ebiten.Image, fn func(img *ebiten.Image)) int64
+
+//go:linkname removeUsageCallback github.com/hajimehoshi/ebiten/v2.removeUsageCallback
+func removeUsageCallback(img *ebiten.Image, token int64)
 
 type offsetAndColor struct {
 	offsetX    float32
@@ -138,6 +292,10 @@ type fillPathsState struct {
 	antialias bool
 	blend     ebiten.Blend
 	fillRule  FillRule
+
+	// cleanup removes the entries for the destination image from theCallbackTokens and theFillPathsStates
+	// when the image is collected.
+	cleanup runtime.Cleanup
 }
 
 func (f *fillPathsState) reset() {
@@ -163,6 +321,7 @@ func (f *fillPathsState) addPath(path *Path, bounds image.Rectangle, clr ebiten.
 	for i, subPath := range path.subPaths {
 		dst.subPaths[i].start = subPath.start
 		dst.subPaths[i].closed = subPath.closed
+		dst.subPaths[i].invalid = subPath.invalid
 		dst.subPaths[i].ops = slices.Grow(dst.subPaths[i].ops, len(subPath.ops))[:len(subPath.ops)]
 		copy(dst.subPaths[i].ops, subPath.ops)
 	}
@@ -185,7 +344,7 @@ func (f *fillPathsState) fillPaths(dst *ebiten.Image) {
 		f.indices = is
 	}()
 
-	theAtlas.setPaths(dst.Bounds(), f.paths, f.antialias)
+	theAtlas.setPaths(dst.Bounds(), f.paths, f.bounds, f.antialias)
 
 	offsetAndColors := offsetAndColorsNonAA
 	if f.antialias {
@@ -486,9 +645,14 @@ func (f *fillPathsState) fillPaths(dst *ebiten.Image) {
 			}
 		}
 		dst2 := dst
+		var recycle bool
 		if dst.Bounds() != f.bounds[i] {
-			dst2 = dst.SubImage(f.bounds[i]).(*ebiten.Image)
+			dst2 = dst.RecyclableSubImage(f.bounds[i])
+			recycle = true
 		}
 		dst2.DrawTrianglesShader32(vs, is, shader, op)
+		if recycle {
+			dst2.Recycle()
+		}
 	}
 }

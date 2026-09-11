@@ -20,8 +20,8 @@ import (
 	"sync/atomic"
 
 	"github.com/hajimehoshi/ebiten/v2/internal/builtinshader"
-	"github.com/hajimehoshi/ebiten/v2/internal/graphics"
-	"github.com/hajimehoshi/ebiten/v2/internal/shaderir"
+	"github.com/hajimehoshi/ebiten/v2/internal/colormshader"
+	"github.com/hajimehoshi/ebiten/v2/internal/legacyshader"
 	"github.com/hajimehoshi/ebiten/v2/internal/ui"
 )
 
@@ -30,7 +30,16 @@ import (
 // For the details about the shader, see https://ebitengine.org/en/documents/shader.html.
 type Shader struct {
 	shader *ui.Shader
-	unit   shaderir.Unit
+
+	// unit is the unit the shader was authored in (//kage:unit). The compiled shader always runs in
+	// the pixel unit; this is kept only to enforce the user-facing rules of the texel unit, such as
+	// requiring source images to be the same size.
+	unit legacyshader.Unit
+}
+
+// unitIsTexels reports whether the shader was authored in the texel unit.
+func (s *Shader) unitIsTexels() bool {
+	return s.unit == legacyshader.Texels
 }
 
 // NewShader compiles a shader program in the shading language Kage, and returns the result.
@@ -43,13 +52,13 @@ func NewShader(src []byte) (*Shader, error) {
 }
 
 func newShader(src []byte, name string) (*Shader, error) {
-	ir, err := graphics.CompileShader(src)
+	ir, unit, err := legacyshader.CompileShader(src)
 	if err != nil {
 		return nil, err
 	}
 	return &Shader{
 		shader: ui.NewShader(ir, name),
-		unit:   ir.Unit,
+		unit:   unit,
 	}, nil
 }
 
@@ -122,7 +131,12 @@ func builtinShader(filter builtinshader.Filter, address builtinshader.Address, u
 			shader = &Shader{shader: ui.LinearFilterShader}
 		}
 	} else {
-		src := builtinshader.ShaderSource(filter, address, useColorM)
+		var src []byte
+		if useColorM {
+			src = colormshader.ShaderSource(colormshader.Filter(filter), colormshader.Address(address))
+		} else {
+			src = builtinshader.ShaderSource(filter, address)
+		}
 		var name string
 		switch filter {
 		case builtinshader.FilterNearest:

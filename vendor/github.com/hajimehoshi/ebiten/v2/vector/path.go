@@ -93,54 +93,73 @@ func (v vec2) mul(s float32) vec2 {
 }
 
 type subPath struct {
-	ops                []op
-	start              point
-	closed             bool
-	cachedValid        bool
-	isCachedValidValid bool
+	ops    []op
+	start  point
+	closed bool
+
+	// invalid indicates that the sub-path has a non-finite coordinate.
+	// The operations modifying the sub-path keep this up to date so that reading a path never writes to it.
+	invalid bool
 }
 
 func (s *subPath) reset() {
 	s.ops = s.ops[:0]
 	s.start = point{}
 	s.closed = false
-	s.cachedValid = false
-	s.isCachedValidValid = false
+	s.invalid = false
 }
 
 func isRegularF32(x float32) bool {
 	return !math.IsNaN(float64(x)) && !math.IsInf(float64(x), 0)
 }
 
-func (s *subPath) isValid() bool {
-	if s.isCachedValidValid {
-		return s.cachedValid
-	}
+func isRegularPoint(p point) bool {
+	return isRegularF32(p.x) && isRegularF32(p.y)
+}
 
-	if !isRegularF32(s.start.x) || !isRegularF32(s.start.y) {
-		s.cachedValid = false
-		s.isCachedValidValid = true
-		return false
+func (s *subPath) isValid() bool {
+	return !s.invalid
+}
+
+// setStart sets the start position of the sub-path, which must not have any operations.
+func (s *subPath) setStart(pt point) {
+	s.start = pt
+	s.invalid = !isRegularPoint(pt)
+}
+
+// appendOp adds the operation o to the sub-path.
+func (s *subPath) appendOp(o op) {
+	s.ops = append(s.ops, o)
+	if s.invalid {
+		return
+	}
+	switch o.typ {
+	case opTypeLineTo:
+		s.invalid = !isRegularPoint(o.p1)
+	case opTypeQuadTo:
+		s.invalid = !isRegularPoint(o.p1) || !isRegularPoint(o.p2)
+	}
+}
+
+// updateValidity updates the validity state, and must be called after the coordinates are modified directly.
+func (s *subPath) updateValidity() {
+	s.invalid = true
+	if !isRegularPoint(s.start) {
+		return
 	}
 	for _, op := range s.ops {
 		switch op.typ {
 		case opTypeLineTo:
-			if !isRegularF32(op.p1.x) || !isRegularF32(op.p1.y) {
-				s.cachedValid = false
-				s.isCachedValidValid = true
-				return false
+			if !isRegularPoint(op.p1) {
+				return
 			}
 		case opTypeQuadTo:
-			if !isRegularF32(op.p1.x) || !isRegularF32(op.p1.y) || !isRegularF32(op.p2.x) || !isRegularF32(op.p2.y) {
-				s.cachedValid = false
-				s.isCachedValidValid = true
-				return false
+			if !isRegularPoint(op.p1) || !isRegularPoint(op.p2) {
+				return
 			}
 		}
 	}
-	s.cachedValid = true
-	s.isCachedValidValid = true
-	return true
+	s.invalid = false
 }
 
 func (s *subPath) startAtOp(index int) point {
@@ -177,55 +196,19 @@ func (s *subPath) endDir(index int) vec2 {
 	panic("not reached")
 }
 
-// flatPath is a flattened sub-path of a path.
-// A flatPath consists of points for line segments.
-type flatPath struct {
-	points []point
-	closed bool
-}
-
-// reset resets the flatPath.
-// reset doesn't release the allocated memory so that the memory can be reused.
-func (f *flatPath) reset() {
-	f.points = f.points[:0]
-	f.closed = false
-}
-
-func (f flatPath) pointCount() int {
-	return len(f.points)
-}
-
-func (f flatPath) lastPoint() point {
-	return f.points[len(f.points)-1]
-}
-
-func (f *flatPath) appendPoint(pt point) {
-	if f.closed {
-		panic("vector: a closed flatPath cannot append a new point")
-	}
-
-	if len(f.points) > 0 {
-		// Do not add a too close point to the last point.
-		// This can cause unexpected rendering results.
-		if lp := f.lastPoint(); abs(lp.x-pt.x) < 1e-2 && abs(lp.y-pt.y) < 1e-2 {
-			return
-		}
-	}
-
-	f.points = append(f.points, pt)
-}
-
-func (f *flatPath) close() {
-	f.closed = true
-}
-
 // Path represents a collection of vector graphics operations.
+//
+// All the coordinates in a path must be finite.
+// A path with a non-finite coordinate produces an undefined result.
 type Path struct {
 	subPaths []subPath
 
 	// flatPaths is a cached actual rendering positions.
 	// flatPaths is used only for deprecated functions. Do not use this for new functions.
 	flatPaths []flatPath
+
+	// opsBuf is a buffer of operations, which AddStroke uses to normalize the source sub-paths.
+	opsBuf []op
 }
 
 // Reset resets the path.
@@ -242,67 +225,13 @@ func (p *Path) resetSubPaths() {
 	p.subPaths = p.subPaths[:0]
 }
 
-func (p *Path) resetFlatPaths() {
-	for _, fp := range p.flatPaths {
-		fp.reset()
-	}
-	p.flatPaths = p.flatPaths[:0]
-}
-
-func (p *Path) resetLastSubPathCacheStates() {
-	if len(p.subPaths) == 0 {
-		return
-	}
-	s := &p.subPaths[len(p.subPaths)-1]
-	s.cachedValid = false
-	s.isCachedValidValid = false
-}
-
-func (p *Path) appendNewFlatPath(pt point) {
-	if cap(p.flatPaths) > len(p.flatPaths) {
-		// Reuse the last flat path since the last flat path might have an already allocated slice.
-		p.flatPaths = p.flatPaths[:len(p.flatPaths)+1]
-		p.flatPaths[len(p.flatPaths)-1].reset()
-		p.flatPaths[len(p.flatPaths)-1].appendPoint(pt)
-		return
-	}
-	p.flatPaths = append(p.flatPaths, flatPath{
-		points: []point{pt},
-	})
-}
-
-func (p *Path) ensureFlatPaths() []flatPath {
-	if len(p.flatPaths) > 0 || len(p.subPaths) == 0 {
-		return p.flatPaths
-	}
-
-	for _, subPath := range p.subPaths {
-		p.appendNewFlatPath(subPath.start)
-		cur := subPath.start
-		for _, op := range subPath.ops {
-			switch op.typ {
-			case opTypeLineTo:
-				p.appendFlatPathPointsForLine(op.p1)
-				cur = op.p1
-			case opTypeQuadTo:
-				p.appendFlatPathPointsForQuad(cur, op.p1, op.p2, 0)
-				cur = op.p2
-			}
-		}
-		if subPath.closed {
-			p.closeFlatPath()
-		}
-	}
-
-	return p.flatPaths
-}
-
 func (p *Path) addSubPaths(n int) {
 	// Use slices.Grow instead of append to reuse the underlying sub path object.
 	p.subPaths = slices.Grow(p.subPaths, n)[:len(p.subPaths)+n]
 }
 
-// MoveTo starts a new sub-path with the given position (x, y) without adding a sub-path,
+// MoveTo starts a new sub-path with the given position (x, y), without adding any line segments.
+// If the last sub-path is still empty, MoveTo updates its start position instead of adding a new one.
 func (p *Path) MoveTo(x, y float32) {
 	p.resetFlatPaths()
 
@@ -310,31 +239,30 @@ func (p *Path) MoveTo(x, y float32) {
 	if len(p.subPaths) == 0 || len(p.subPaths[len(p.subPaths)-1].ops) > 0 {
 		p.addSubPaths(1)
 	}
-	p.resetLastSubPathCacheStates()
-	p.subPaths[len(p.subPaths)-1].start = point{x: x, y: y}
+	p.subPaths[len(p.subPaths)-1].setStart(point{x: x, y: y})
 	p.subPaths[len(p.subPaths)-1].closed = false
 }
 
 // LineTo adds a line segment to the path, which starts from the last position of the current sub-path
 // and ends to the given position (x, y).
-// If p doesn't have any sub-paths or the last sub-path is closed, LineTo sets (x, y) as the start position of a new sub-path.
+// If p doesn't have any sub-paths, LineTo sets (x, y) as the start position of a new sub-path.
+// If the last sub-path is closed, LineTo creates a new sub-path whose start position is the same as the closed sub-path's.
 func (p *Path) LineTo(x, y float32) {
 	p.resetFlatPaths()
 
 	if len(p.subPaths) == 0 {
 		p.addSubPaths(1)
-		p.subPaths[len(p.subPaths)-1].start = point{x: x, y: y}
+		p.subPaths[len(p.subPaths)-1].setStart(point{x: x, y: y})
 	} else if p.subPaths[len(p.subPaths)-1].closed {
 		p.addSubPaths(1)
-		p.subPaths[len(p.subPaths)-1].start = p.subPaths[len(p.subPaths)-2].start
+		p.subPaths[len(p.subPaths)-1].setStart(p.subPaths[len(p.subPaths)-2].start)
 	}
-	p.resetLastSubPathCacheStates()
 	if cur, ok := p.currentPosition(); ok {
 		if cur.x == x && cur.y == y {
 			return
 		}
 	}
-	p.subPaths[len(p.subPaths)-1].ops = append(p.subPaths[len(p.subPaths)-1].ops, op{
+	p.subPaths[len(p.subPaths)-1].appendOp(op{
 		typ: opTypeLineTo,
 		p1:  point{x: x, y: y},
 	})
@@ -347,18 +275,20 @@ func (p *Path) QuadTo(x1, y1, x2, y2 float32) {
 
 	if len(p.subPaths) == 0 {
 		p.addSubPaths(1)
-		p.subPaths[len(p.subPaths)-1].start = point{x: x1, y: y1}
+		p.subPaths[len(p.subPaths)-1].setStart(point{x: x1, y: y1})
 	} else if p.subPaths[len(p.subPaths)-1].closed {
 		p.addSubPaths(1)
-		p.subPaths[len(p.subPaths)-1].start = p.subPaths[len(p.subPaths)-2].start
+		p.subPaths[len(p.subPaths)-1].setStart(p.subPaths[len(p.subPaths)-2].start)
 	}
-	p.resetLastSubPathCacheStates()
 	if cur, ok := p.currentPosition(); ok {
-		if cur.x == x2 && cur.y == y2 {
+		// A quadratic whose start, control, and end points all coincide is a single point and can be dropped.
+		// Even if the start and end points coincide, it is not a single point when the control point differs:
+		// it is a cusp, which goes to the midpoint and comes back, so it must be kept.
+		if cur.x == x1 && cur.y == y1 && cur.x == x2 && cur.y == y2 {
 			return
 		}
 	}
-	p.subPaths[len(p.subPaths)-1].ops = append(p.subPaths[len(p.subPaths)-1].ops, op{
+	p.subPaths[len(p.subPaths)-1].appendOp(op{
 		typ: opTypeQuadTo,
 		p1:  point{x: x1, y: y1},
 		p2:  point{x: x2, y: y2},
@@ -478,14 +408,6 @@ func (p *Path) Close() {
 	p.subPaths[len(p.subPaths)-1].closed = true
 }
 
-func (p *Path) appendFlatPathPointsForLine(pt point) {
-	if len(p.flatPaths) == 0 || p.flatPaths[len(p.flatPaths)-1].closed {
-		p.appendNewFlatPath(pt)
-		return
-	}
-	p.flatPaths[len(p.flatPaths)-1].appendPoint(pt)
-}
-
 // lineForTwoPoints returns parameters for a line passing through p0 and p1.
 func lineForTwoPoints(p0, p1 point) (a, b, c float32) {
 	// Line passing through p0 and p1 in the form of ax + by + c = 0
@@ -495,7 +417,7 @@ func lineForTwoPoints(p0, p1 point) (a, b, c float32) {
 	return
 }
 
-// isPointCloseToSegment detects the distance between a segment (x0, y0)-(x1, y1) and a point (x, y) is less than allow.
+// isPointCloseToSegment detects the distance between the point p and the line passing through p0 and p1 is less than allow.
 // If p0 and p1 are the same, isPointCloseToSegment returns true when the distance between p0 and p is less than allow.
 func isPointCloseToSegment(p, p0, p1 point, allow float32) bool {
 	if p0 == p1 {
@@ -529,32 +451,6 @@ func crossingPointForTwoLines(p00, p01, p10, p11 point) point {
 	}
 }
 
-func (p *Path) appendFlatPathPointsForQuad(p0, p1, p2 point, level int) {
-	if level > 10 {
-		return
-	}
-
-	if isPointCloseToSegment(p1, p0, p2, 0.5) {
-		p.appendFlatPathPointsForLine(p2)
-		return
-	}
-
-	p01 := point{
-		x: (p0.x + p1.x) / 2,
-		y: (p0.y + p1.y) / 2,
-	}
-	p12 := point{
-		x: (p1.x + p2.x) / 2,
-		y: (p1.y + p2.y) / 2,
-	}
-	p012 := point{
-		x: (p01.x + p12.x) / 2,
-		y: (p01.y + p12.y) / 2,
-	}
-	p.appendFlatPathPointsForQuad(p0, p01, p012, level+1)
-	p.appendFlatPathPointsForQuad(p012, p12, p2, level+1)
-}
-
 func (p *Path) currentPosition() (point, bool) {
 	if len(p.subPaths) == 0 {
 		return point{}, false
@@ -574,7 +470,11 @@ func (p *Path) currentPosition() (point, bool) {
 }
 
 // ArcTo adds an arc curve to the path.
-// (x1, y1) is the first control point, and (x2, y2) is the second control point.
+// The arc is tangent to the line from the current position to (x1, y1) and to the line from (x1, y1) to (x2, y2).
+// (x1, y1) is the corner point where the two tangent lines meet, and (x2, y2) gives the direction of the second
+// tangent line. The arc ends at the tangent point on the second tangent line, which is at the distance of
+// radius / tan(θ/2) from (x1, y1), where θ is the angle at (x1, y1) between the two rays.
+// radius must be non-negative. A negative radius produces an undefined result.
 func (p *Path) ArcTo(x1, y1, x2, y2, radius float32) {
 	p0, ok := p.currentPosition()
 	if !ok {
@@ -603,8 +503,9 @@ func (p *Path) ArcTo(x1, y1, x2, y2, radius float32) {
 	d0 = d0.norm()
 	d1 = d1.norm()
 
+	dot := min(max(float64(d0.x*d1.x+d0.y*d1.y), -1.0), 1.0)
 	// theta is the angle between two vectors d0 and d1.
-	theta := math.Acos(float64(d0.x*d1.x + d0.y*d1.y))
+	theta := math.Acos(dot)
 	// TODO: When theta is bigger than π/2, the arc should be split into two.
 	if theta == 0 {
 		p.LineTo(x2, y2)
@@ -655,6 +556,7 @@ func euclideanMod(a, b float32) float32 {
 
 // Arc adds an arc to the path.
 // (x, y) is the center of the arc.
+// radius must be non-negative. A negative radius produces an undefined result.
 func (p *Path) Arc(x, y, radius, startAngle, endAngle float32, dir Direction) {
 	origStartAngle := startAngle
 	origEndAngle := endAngle
@@ -678,13 +580,13 @@ func (p *Path) Arc(x, y, radius, startAngle, endAngle float32, dir Direction) {
 		}
 	}
 
-	// If the angle is big, splict this into multiple Arc calls.
+	// If the angle is big, split this into multiple arcs.
 	if da > math.Pi/2 {
 		const delta = math.Pi / 3
 		a := float64(startAngle)
 		if dir == Clockwise {
 			for {
-				p.Arc(x, y, radius, float32(a), float32(math.Min(a+delta, float64(endAngle))), dir)
+				p.arc(x, y, radius, float32(a), float32(min(a+delta, float64(endAngle))), dir)
 				if a+delta >= float64(endAngle) {
 					break
 				}
@@ -692,7 +594,7 @@ func (p *Path) Arc(x, y, radius, startAngle, endAngle float32, dir Direction) {
 			}
 		} else {
 			for {
-				p.Arc(x, y, radius, float32(a), float32(math.Max(a-delta, float64(endAngle))), dir)
+				p.arc(x, y, radius, float32(a), float32(max(a-delta, float64(endAngle))), dir)
 				if a-delta <= float64(endAngle) {
 					break
 				}
@@ -700,6 +602,19 @@ func (p *Path) Arc(x, y, radius, startAngle, endAngle float32, dir Direction) {
 			}
 		}
 		return
+	}
+
+	p.arc(x, y, radius, startAngle, endAngle, dir)
+}
+
+// arc adds an arc to the path without splitting it.
+// startAngle and endAngle must be already adjusted so that the arc sweeps from startAngle to endAngle in the direction dir.
+func (p *Path) arc(x, y, radius, startAngle, endAngle float32, dir Direction) {
+	var da float64
+	if dir == Clockwise {
+		da = float64(endAngle - startAngle)
+	} else {
+		da = float64(startAngle - endAngle)
 	}
 
 	sin0, cos0 := math.Sincos(float64(startAngle))
@@ -727,54 +642,6 @@ func (p *Path) Arc(x, y, radius, startAngle, endAngle float32, dir Direction) {
 		cy1 = y1 + l*float32(cos1)
 	}
 	p.CubicTo(cx0, cy0, cx1, cy1, x1, y1)
-}
-
-func (p *Path) closeFlatPath() {
-	if len(p.flatPaths) == 0 {
-		return
-	}
-	p.flatPaths[len(p.flatPaths)-1].close()
-}
-
-// AppendVerticesAndIndicesForFilling appends vertices and indices to fill this path and returns them.
-//
-// AppendVerticesAndIndicesForFilling works in a similar way to the built-in append function.
-// If the arguments are nils, AppendVerticesAndIndicesForFilling returns new slices.
-//
-// The returned vertice's SrcX and SrcY are 0, and ColorR, ColorG, ColorB, and ColorA are 1.
-//
-// The returned values are intended to be passed to DrawTriangles or DrawTrianglesShader with FileRuleNonZero or FillRuleEvenOdd
-// in order to render a complex polygon like a concave polygon, a polygon with holes, or a self-intersecting polygon.
-//
-// The returned vertices and indices should be rendered with a solid (non-transparent) color with the default Blend (source-over).
-// Otherwise, there is no guarantee about the rendering result.
-//
-// Deprecated: as of v2.9. Use [FillPath] instead.
-func (p *Path) AppendVerticesAndIndicesForFilling(vertices []ebiten.Vertex, indices []uint16) ([]ebiten.Vertex, []uint16) {
-	base := uint16(len(vertices))
-	for _, flatPath := range p.ensureFlatPaths() {
-		if flatPath.pointCount() < 3 {
-			continue
-		}
-		for i, pt := range flatPath.points {
-			vertices = append(vertices, ebiten.Vertex{
-				DstX:   pt.x,
-				DstY:   pt.y,
-				SrcX:   0,
-				SrcY:   0,
-				ColorR: 1,
-				ColorG: 1,
-				ColorB: 1,
-				ColorA: 1,
-			})
-			if i < 2 {
-				continue
-			}
-			indices = append(indices, base, base+uint16(i-1), base+uint16(i))
-		}
-		base += uint16(flatPath.pointCount())
-	}
-	return vertices, indices
 }
 
 // AddPathOptions is options for [Path.AddPath].
@@ -824,278 +691,90 @@ func (p *Path) AddPath(src *Path, options *AddPathOptions) {
 				}
 			}
 		}
+
+		p.subPaths[n+i].updateValidity()
 	}
 }
 
-// normalize normalizes the path by removing unnecessary sub-paths and points.
-func (p *Path) normalize() {
-	for i, subPath := range p.subPaths {
-		cur := subPath.start
-		var n int
-		for _, op := range subPath.ops {
-			switch op.typ {
-			case opTypeLineTo:
-				if cur == op.p1 {
-					continue
-				}
-				cur = op.p1
-			case opTypeQuadTo:
-				switch {
-				case cur == op.p2:
-					continue
-				case cur == op.p1, op.p1 == op.p2:
-					op.typ = opTypeLineTo
-					op.p1 = op.p2
-					op.p2 = point{}
-					cur = op.p1
-				case (op.p1.x-cur.x)*(op.p2.y-cur.y)-(op.p2.x-cur.x)*(op.p1.y-cur.y) == 0:
-					op.typ = opTypeLineTo
-					op.p1 = op.p2
-					op.p2 = point{}
-					cur = op.p1
-				default:
-					cur = op.p2
-				}
-			}
-			p.subPaths[i].ops[n] = op
-			n++
-		}
-		p.subPaths[i].ops = slices.Delete(p.subPaths[i].ops, n, len(subPath.ops))
-	}
-
-	// Do not use slices.DeleteFunc as sub-paths's slices should be reused.
+// countCusps counts the number of cusps in subPath, which are quadratic curves whose start and end points are the same
+// and whose control point differs from them.
+func countCusps(subPath *subPath) int {
 	var n int
-	for i := range p.subPaths {
-		if len(p.subPaths[i].ops) == 0 {
-			p.subPaths[i].reset()
-			continue
+	cur := subPath.start
+	for _, op := range subPath.ops {
+		switch op.typ {
+		case opTypeLineTo:
+			cur = op.p1
+		case opTypeQuadTo:
+			if cur == op.p2 && cur != op.p1 {
+				n++
+			}
+			cur = op.p2
 		}
-		p.subPaths[n] = p.subPaths[i]
-		n++
 	}
-	p.subPaths = p.subPaths[:n]
+	return n
 }
 
-// AppendVerticesAndIndicesForStroke appends vertices and indices to render a stroke of this path and returns them.
-// AppendVerticesAndIndicesForStroke works in a similar way to the built-in append function.
-// If the arguments are nils, AppendVerticesAndIndicesForStroke returns new slices.
-//
-// The returned vertice's SrcX and SrcY are 0, and ColorR, ColorG, ColorB, and ColorA are 1.
-//
-// The returned values are intended to be passed to DrawTriangles or DrawTrianglesShader with a solid (non-transparent) color
-// with FillRuleFillAll or FillRuleNonZero, not FileRuleEvenOdd.
-//
-// Deprecated: as of v2.9. Use [StrokePath] or [Path.AddStroke] instead.
-func (p *Path) AppendVerticesAndIndicesForStroke(vertices []ebiten.Vertex, indices []uint16, op *StrokeOptions) ([]ebiten.Vertex, []uint16) {
-	if op == nil {
-		return vertices, indices
-	}
-
-	var rects [][4]point
-	var tmpPath Path
-	for _, flatPath := range p.ensureFlatPaths() {
-		if flatPath.pointCount() < 2 {
-			continue
-		}
-
-		rects = rects[:0]
-		for i := 0; i < flatPath.pointCount()-1; i++ {
-			pt := flatPath.points[i]
-
-			nextPt := flatPath.points[i+1]
-			dx := nextPt.x - pt.x
-			dy := nextPt.y - pt.y
-			dist := float32(math.Sqrt(float64(dx*dx + dy*dy)))
-			extX := (dy) * op.Width / 2 / dist
-			extY := (-dx) * op.Width / 2 / dist
-
-			rects = append(rects, [4]point{
-				{
-					x: pt.x + extX,
-					y: pt.y + extY,
-				},
-				{
-					x: nextPt.x + extX,
-					y: nextPt.y + extY,
-				},
-				{
-					x: pt.x - extX,
-					y: pt.y - extY,
-				},
-				{
-					x: nextPt.x - extX,
-					y: nextPt.y - extY,
-				},
-			})
-		}
-
-		for i, rect := range rects {
-			idx := uint16(len(vertices))
-			for _, pt := range rect {
-				vertices = append(vertices, ebiten.Vertex{
-					DstX:   pt.x,
-					DstY:   pt.y,
-					SrcX:   0,
-					SrcY:   0,
-					ColorR: 1,
-					ColorG: 1,
-					ColorB: 1,
-					ColorA: 1,
-				})
-			}
-			// All the triangles are rendered in clockwise order to enable FillRuleNonZero (#2833).
-			indices = append(indices, idx, idx+1, idx+2, idx+1, idx+3, idx+2)
-
-			// Add line joints.
-			var nextRect [4]point
-			if i < len(rects)-1 {
-				nextRect = rects[i+1]
-			} else if flatPath.closed {
-				nextRect = rects[0]
-			} else {
+// normalizeSubPath normalizes src by removing unnecessary operations, and stores the result into dst.
+// dst must not be src.
+func normalizeSubPath(dst *subPath, src *subPath) {
+	// A cusp is converted into two lines, which increases the number of operations.
+	ops := slices.Grow(dst.ops[:0], len(src.ops)+countCusps(src))
+	cur := src.start
+	for _, op := range src.ops {
+		switch op.typ {
+		case opTypeLineTo:
+			if cur == op.p1 {
 				continue
 			}
-
-			// c is the center of the 'end' edge of the current rect (= the second point of the segment).
-			c := point{
-				x: (rect[1].x + rect[3].x) / 2,
-				y: (rect[1].y + rect[3].y) / 2,
-			}
-
-			// Note that the Y direction and the angle direction are opposite from math's.
-			a0 := float32(math.Atan2(float64(rect[1].y-c.y), float64(rect[1].x-c.x)))
-			a1 := float32(math.Atan2(float64(nextRect[0].y-c.y), float64(nextRect[0].x-c.x)))
-			da := a1 - a0
-			for da < 0 {
-				da += 2 * math.Pi
-			}
-			if da == 0 {
+			cur = op.p1
+		case opTypeQuadTo:
+			switch {
+			case cur == op.p1 && op.p1 == op.p2:
+				// A single point: drop it.
 				continue
-			}
-
-			switch op.LineJoin {
-			case LineJoinMiter:
-				delta := math.Pi - da
-				exceed := float32(math.Abs(1/math.Sin(float64(delta/2)))) > op.MiterLimit
-
-				// Quadrilateral
-				tmpPath.Reset()
-				tmpPath.MoveTo(c.x, c.y)
-				if da < math.Pi {
-					tmpPath.LineTo(rect[1].x, rect[1].y)
-					if !exceed {
-						pt := crossingPointForTwoLines(rect[0], rect[1], nextRect[0], nextRect[1])
-						tmpPath.LineTo(pt.x, pt.y)
-					}
-					tmpPath.LineTo(nextRect[0].x, nextRect[0].y)
-				} else {
-					tmpPath.LineTo(rect[3].x, rect[3].y)
-					if !exceed {
-						pt := crossingPointForTwoLines(rect[2], rect[3], nextRect[2], nextRect[3])
-						tmpPath.LineTo(pt.x, pt.y)
-					}
-					tmpPath.LineTo(nextRect[2].x, nextRect[2].y)
+			case cur == op.p2:
+				// A cusp goes to the midpoint and comes back.
+				// Keep this as lines, not as a curve, so that the 180-degree turn at the tip gets a joint.
+				// Divide by 2 before adding so that the midpoint computation cannot overflow.
+				mid := point{
+					x: cur.x/2 + op.p1.x/2,
+					y: cur.y/2 + op.p1.y/2,
 				}
-				vertices, indices = tmpPath.AppendVerticesAndIndicesForFilling(vertices, indices)
-
-			case LineJoinBevel:
-				// Triangle
-				tmpPath.Reset()
-				tmpPath.MoveTo(c.x, c.y)
-				if da < math.Pi {
-					tmpPath.LineTo(rect[1].x, rect[1].y)
-					tmpPath.LineTo(nextRect[0].x, nextRect[0].y)
-				} else {
-					tmpPath.LineTo(rect[3].x, rect[3].y)
-					tmpPath.LineTo(nextRect[2].x, nextRect[2].y)
+				if mid == cur {
+					// The midpoint is rounded to the current point in float32, so there is nothing to keep.
+					continue
 				}
-				vertices, indices = tmpPath.AppendVerticesAndIndicesForFilling(vertices, indices)
-
-			case LineJoinRound:
-				// Arc
-				tmpPath.Reset()
-				tmpPath.MoveTo(c.x, c.y)
-				if da < math.Pi {
-					tmpPath.Arc(c.x, c.y, op.Width/2, a0, a1, Clockwise)
-				} else {
-					tmpPath.Arc(c.x, c.y, op.Width/2, a0+math.Pi, a1+math.Pi, CounterClockwise)
-				}
-				vertices, indices = tmpPath.AppendVerticesAndIndicesForFilling(vertices, indices)
+				first := op
+				first.typ = opTypeLineTo
+				first.p1 = mid
+				first.p2 = point{}
+				ops = append(ops, first)
+				op.typ = opTypeLineTo
+				op.p1 = op.p2
+				op.p2 = point{}
+				cur = op.p1
+			case cur == op.p1, op.p1 == op.p2:
+				op.typ = opTypeLineTo
+				op.p1 = op.p2
+				op.p2 = point{}
+				cur = op.p1
+			case (op.p1.x-cur.x)*(op.p2.y-cur.y)-(op.p2.x-cur.x)*(op.p1.y-cur.y) == 0:
+				op.typ = opTypeLineTo
+				op.p1 = op.p2
+				op.p2 = point{}
+				cur = op.p1
+			default:
+				cur = op.p2
 			}
 		}
-
-		if len(rects) == 0 {
-			continue
-		}
-
-		// If the flat path is closed, do not render line caps.
-		if flatPath.closed {
-			continue
-		}
-
-		switch op.LineCap {
-		case LineCapButt:
-			// Do nothing.
-
-		case LineCapRound:
-			startR, endR := rects[0], rects[len(rects)-1]
-			{
-				c := point{
-					x: (startR[0].x + startR[2].x) / 2,
-					y: (startR[0].y + startR[2].y) / 2,
-				}
-				a := float32(math.Atan2(float64(startR[0].y-startR[2].y), float64(startR[0].x-startR[2].x)))
-				// Arc
-				tmpPath.Reset()
-				tmpPath.MoveTo(startR[0].x, startR[0].y)
-				tmpPath.Arc(c.x, c.y, op.Width/2, a, a+math.Pi, CounterClockwise)
-				vertices, indices = tmpPath.AppendVerticesAndIndicesForFilling(vertices, indices)
-			}
-			{
-				c := point{
-					x: (endR[1].x + endR[3].x) / 2,
-					y: (endR[1].y + endR[3].y) / 2,
-				}
-				a := float32(math.Atan2(float64(endR[1].y-endR[3].y), float64(endR[1].x-endR[3].x)))
-				// Arc
-				tmpPath.Reset()
-				tmpPath.MoveTo(endR[1].x, endR[1].y)
-				tmpPath.Arc(c.x, c.y, op.Width/2, a, a+math.Pi, Clockwise)
-				vertices, indices = tmpPath.AppendVerticesAndIndicesForFilling(vertices, indices)
-			}
-
-		case LineCapSquare:
-			startR, endR := rects[0], rects[len(rects)-1]
-			{
-				a := math.Atan2(float64(startR[0].y-startR[1].y), float64(startR[0].x-startR[1].x))
-				s, c := math.Sincos(a)
-				dx, dy := float32(c)*op.Width/2, float32(s)*op.Width/2
-
-				// Quadrilateral
-				tmpPath.Reset()
-				tmpPath.MoveTo(startR[0].x, startR[0].y)
-				tmpPath.LineTo(startR[0].x+dx, startR[0].y+dy)
-				tmpPath.LineTo(startR[2].x+dx, startR[2].y+dy)
-				tmpPath.LineTo(startR[2].x, startR[2].y)
-				vertices, indices = tmpPath.AppendVerticesAndIndicesForFilling(vertices, indices)
-			}
-			{
-				a := math.Atan2(float64(endR[1].y-endR[0].y), float64(endR[1].x-endR[0].x))
-				s, c := math.Sincos(a)
-				dx, dy := float32(c)*op.Width/2, float32(s)*op.Width/2
-
-				// Quadrilateral
-				tmpPath.Reset()
-				tmpPath.MoveTo(endR[1].x, endR[1].y)
-				tmpPath.LineTo(endR[1].x+dx, endR[1].y+dy)
-				tmpPath.LineTo(endR[3].x+dx, endR[3].y+dy)
-				tmpPath.LineTo(endR[3].x, endR[3].y)
-				vertices, indices = tmpPath.AppendVerticesAndIndicesForFilling(vertices, indices)
-			}
-		}
+		ops = append(ops, op)
 	}
 
-	return vertices, indices
+	dst.ops = ops
+	dst.start = src.start
+	dst.closed = src.closed
+	dst.updateValidity()
 }
 
 func floor(x float32) int {
@@ -1107,18 +786,22 @@ func ceil(x float32) int {
 }
 
 // Bounds returns the minimum bounding rectangle of the path.
+// The rectangle can have a zero width or height when the path is degenerate in an axis, like a horizontal line.
+// Bounds returns the zero rectangle when the path has no drawing operations.
 func (p *Path) Bounds() image.Rectangle {
 	// Note that (image.Rectangle).Union doesn't work well with empty rectangles.
 	totalMinX := math.MaxInt
 	totalMinY := math.MaxInt
 	totalMaxX := math.MinInt
 	totalMaxY := math.MinInt
+	var found bool
 
 	for i := range p.subPaths {
 		subPath := &p.subPaths[i]
-		if !subPath.isValid() {
+		if !subPath.isValid() || len(subPath.ops) == 0 {
 			continue
 		}
+		found = true
 
 		minX := math.MaxInt
 		minY := math.MaxInt
@@ -1174,7 +857,7 @@ func (p *Path) Bounds() image.Rectangle {
 		totalMaxX = max(totalMaxX, maxX)
 		totalMaxY = max(totalMaxY, maxY)
 	}
-	if totalMinX >= totalMaxX || totalMinY >= totalMaxY {
+	if !found {
 		return image.Rectangle{}
 	}
 	return image.Rect(totalMinX, totalMinY, totalMaxX, totalMaxY)

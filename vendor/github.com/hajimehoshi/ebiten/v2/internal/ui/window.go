@@ -21,6 +21,8 @@ import (
 type Window interface {
 	IsDecorated() bool
 	SetDecorated(decorated bool)
+	IsVisible() bool
+	SetVisible(visible bool)
 	ResizingMode() WindowResizingMode
 	SetResizingMode(mode WindowResizingMode)
 	SetMonitor(*Monitor)
@@ -38,6 +40,7 @@ type Window interface {
 	IsMinimized() bool
 	SetIcon(iconImages []image.Image)
 	SetTitle(title string)
+	applyColorMode()
 	Restore()
 	SetClosingHandled(handled bool)
 	IsClosingHandled() bool
@@ -55,11 +58,21 @@ func (*nullWindow) IsDecorated() bool {
 func (*nullWindow) SetDecorated(decorated bool) {
 }
 
+func (*nullWindow) IsVisible() bool {
+	return false
+}
+
+func (*nullWindow) SetVisible(visible bool) {
+}
+
 func (*nullWindow) ResizingMode() WindowResizingMode {
 	return WindowResizingModeDisabled
 }
 
 func (*nullWindow) SetResizingMode(mode WindowResizingMode) {
+}
+
+func (*nullWindow) applyResizingMode() {
 }
 
 func (*nullWindow) SetMonitor(monitor *Monitor) {
@@ -113,10 +126,19 @@ func (*nullWindow) SetIcon(iconImages []image.Image) {
 func (*nullWindow) SetTitle(title string) {
 }
 
+func (*nullWindow) applyTitle() {
+}
+
+func (*nullWindow) applyColorMode() {
+}
+
 func (*nullWindow) Restore() {
 }
 
 func (*nullWindow) SetClosingHandled(handled bool) {
+}
+
+func (*nullWindow) applyClosingHandled() {
 }
 
 func (*nullWindow) IsClosingHandled() bool {

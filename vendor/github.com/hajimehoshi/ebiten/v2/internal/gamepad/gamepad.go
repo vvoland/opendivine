@@ -15,6 +15,7 @@
 package gamepad
 
 import (
+	"errors"
 	"sync"
 	"time"
 
@@ -36,9 +37,10 @@ const (
 )
 
 type gamepads struct {
-	inited   bool
-	gamepads []*Gamepad
-	m        sync.Mutex
+	inited       bool
+	gamepads     []*Gamepad
+	nativeWindow uintptr
+	m            sync.Mutex
 
 	native nativeGamepads
 }
@@ -48,8 +50,21 @@ type nativeGamepads interface {
 	update(gamepads *gamepads) error
 }
 
-var theGamepads = gamepads{
-	native: newNativeGamepadsImpl(),
+var theGamepads gamepads
+
+// ensureNative constructs the native backend on first use if it is not already set: a virtual backend
+// (whose gamepads are passed to [Update]) when virtual is true, otherwise the device-polling backend.
+//
+// ensureNative must be called with g.m held.
+func (g *gamepads) ensureNative(virtual bool) {
+	if g.native != nil {
+		return
+	}
+	if virtual {
+		g.native = nativeGamepadsVirtual{}
+		return
+	}
+	g.native = newNativeGamepadsImpl()
 }
 
 // AppendGamepadIDs is concurrent-safe.
@@ -58,17 +73,17 @@ func AppendGamepadIDs(ids []ID) []ID {
 }
 
 // Update is concurrent-safe.
-func Update() error {
-	return theGamepads.update()
+//
+// nativeWindow is the platform's native window handle, or 0 if there is none. virtualGamepads selects
+// the gamepads: a nil slice polls the real devices, while a non-nil slice (possibly empty) makes the
+// connected gamepads exactly those it describes.
+func Update(nativeWindow uintptr, virtualGamepads []VirtualGamepadState) error {
+	return theGamepads.update(nativeWindow, virtualGamepads)
 }
 
 // Get is concurrent-safe.
 func Get(id ID) *Gamepad {
 	return theGamepads.get(id)
-}
-
-func SetNativeWindow(nativeWindow uintptr) {
-	theGamepads.setNativeWindow(nativeWindow)
 }
 
 func (g *gamepads) appendGamepadIDs(ids []ID) []ID {
@@ -83,9 +98,32 @@ func (g *gamepads) appendGamepadIDs(ids []ID) []ID {
 	return ids
 }
 
-func (g *gamepads) update() error {
+func (g *gamepads) update(nativeWindow uintptr, virtualGamepads []VirtualGamepadState) error {
 	g.m.Lock()
 	defer g.m.Unlock()
+
+	virtual := virtualGamepads != nil
+
+	// The first Update fixes whether the gamepads are virtual; it must not change afterward, as the
+	// constructed backend and the gamepad list assume a single mode.
+	if g.native != nil {
+		if _, wasVirtual := g.native.(nativeGamepadsVirtual); wasVirtual != virtual {
+			return errors.New("gamepad: virtualGamepads must be consistently nil or non-nil across Update calls")
+		}
+	}
+
+	g.ensureNative(virtual)
+
+	if g.nativeWindow != nativeWindow {
+		if n, ok := g.native.(interface{ setNativeWindow(uintptr) }); ok {
+			n.setNativeWindow(nativeWindow)
+		}
+		g.nativeWindow = nativeWindow
+	}
+
+	if virtual {
+		g.setVirtualGamepads(virtualGamepads)
+	}
 
 	if !g.inited {
 		if err := g.native.init(g); err != nil {
@@ -102,7 +140,12 @@ func (g *gamepads) update() error {
 	// recognized as gamepads by OSes. In this case, the number of the 'buttons' can exceed the
 	// maximum. Skip such devices as a tentative solution (#1173, #2039).
 	g.remove(func(gamepad *Gamepad) bool {
-		return gamepad.ButtonCount() > ButtonCount
+		if gamepad.ButtonCount() <= ButtonCount {
+			return false
+		}
+		// The gamepad is never updated again, so release its native resources as a disconnection does.
+		gamepad.close()
+		return true
 	})
 
 	for _, gp := range g.gamepads {
@@ -169,20 +212,15 @@ func (g *gamepads) remove(cond func(*Gamepad) bool) {
 	}
 }
 
-func (g *gamepads) setNativeWindow(nativeWindow uintptr) {
-	g.m.Lock()
-	defer g.m.Unlock()
-
-	var n any = g.native
-	if n, ok := n.(interface{ setNativeWindow(uintptr) }); ok {
-		n.setNativeWindow(nativeWindow)
-	}
-}
-
 type Gamepad struct {
 	name  string
 	sdlID string
-	m     sync.Mutex
+	// virtual reports that the gamepad's state is supplied externally (the gamepads passed to [Update])
+	// rather than read from a device. Its standard-layout mapping comes from its native input rather
+	// than from gamepaddb, so an external driver can present any standard layout it likes regardless of
+	// the SDL ID. It is set once when the gamepad is created and never changes.
+	virtual bool
+	m       sync.Mutex
 
 	native nativeGamepad
 }
@@ -258,6 +296,48 @@ func (g *Gamepad) update(gamepads *gamepads) error {
 	return g.native.update(gamepads)
 }
 
+// close releases g's native resources. It does nothing for a backend whose gamepads own none.
+func (g *Gamepad) close() {
+	g.m.Lock()
+	defer g.m.Unlock()
+
+	if n, ok := g.native.(interface{ close() }); ok {
+		n.close()
+	}
+}
+
+// withNative calls f with g's native state while holding g's lock. T must be the concrete native type
+// of the backend that owns g.
+func withNative[T nativeGamepad](g *Gamepad, f func(n T)) {
+	g.m.Lock()
+	defer g.m.Unlock()
+
+	f(g.native.(T))
+}
+
+// gamepadUnderLock gives gamepaddb a gamepad's raw state without taking the gamepad's lock, so that
+// a whole standard-layout query is evaluated in one critical section and reads a single hardware
+// report. The gamepad's lock must be held while its methods are called.
+type gamepadUnderLock struct {
+	gamepad *Gamepad
+}
+
+func (g gamepadUnderLock) IsAxisReady(index int) bool {
+	return g.gamepad.native.isAxisReady(index)
+}
+
+func (g gamepadUnderLock) Axis(index int) float64 {
+	return g.gamepad.native.axisValue(index)
+}
+
+func (g gamepadUnderLock) Button(index int) bool {
+	return g.gamepad.native.isButtonPressed(index)
+}
+
+func (g gamepadUnderLock) Hat(index int) int {
+	return g.gamepad.native.hatState(index)
+}
+
 // Name is concurrent-safe.
 func (g *Gamepad) Name() string {
 	// This is immutable and doesn't have to be protected by a mutex.
@@ -329,83 +409,138 @@ func (g *Gamepad) Hat(hat int) int {
 	return g.native.hatState(hat)
 }
 
-// IsStandardLayoutAvailable is concurrent-safe.
-func (g *Gamepad) IsStandardLayoutAvailable() bool {
+// ButtonCountWithHats returns the number of the buttons, counting each hat as the four buttons that
+// follow the real ones.
+//
+// ButtonCountWithHats is concurrent-safe.
+func (g *Gamepad) ButtonCountWithHats() int {
 	g.m.Lock()
 	defer g.m.Unlock()
 
-	if gamepaddb.HasStandardLayoutMapping(g.sdlID) {
+	return g.native.buttonCount() + g.native.hatCount()*4
+}
+
+// IsButtonPressedWithHats reports whether the button is pressed, where button indices at and above
+// the number of the real buttons are the hats' directions.
+//
+// IsButtonPressedWithHats is concurrent-safe.
+func (g *Gamepad) IsButtonPressedWithHats(button int) bool {
+	g.m.Lock()
+	defer g.m.Unlock()
+
+	buttonCount := g.native.buttonCount()
+	if button < buttonCount {
+		return g.native.isButtonPressed(button)
+	}
+	if hat := (button - buttonCount) / 4; hat < g.native.hatCount() {
+		dir := (button - buttonCount) % 4
+		return g.native.hatState(hat)&(1<<dir) != 0
+	}
+	return false
+}
+
+// standardAxisMapping returns the mapping of the standard axis in the gamepad database. The mapping
+// is empty for a virtual gamepad, which serves the standard layout its driver gives it.
+//
+// standardAxisMapping must be called without g's lock, as the database takes its own lock.
+func (g *Gamepad) standardAxisMapping(axis gamepaddb.StandardAxis) gamepaddb.Mapping {
+	if g.virtual {
+		return gamepaddb.Mapping{}
+	}
+	return gamepaddb.StandardAxisMapping(g.sdlID, axis)
+}
+
+// standardButtonMapping returns the mapping of the standard button in the gamepad database. The
+// mapping is empty for a virtual gamepad, which serves the standard layout its driver gives it.
+//
+// standardButtonMapping must be called without g's lock, as the database takes its own lock.
+func (g *Gamepad) standardButtonMapping(button gamepaddb.StandardButton) gamepaddb.Mapping {
+	if g.virtual {
+		return gamepaddb.Mapping{}
+	}
+	return gamepaddb.StandardButtonMapping(g.sdlID, button)
+}
+
+// IsStandardLayoutAvailable is concurrent-safe.
+func (g *Gamepad) IsStandardLayoutAvailable() bool {
+	if !g.virtual && gamepaddb.HasStandardLayoutMapping(g.sdlID) {
 		return true
 	}
+
+	g.m.Lock()
+	defer g.m.Unlock()
+
 	return g.native.hasOwnStandardLayoutMapping()
 }
 
 // IsStandardAxisAvailable is concurrent safe.
 func (g *Gamepad) IsStandardAxisAvailable(axis gamepaddb.StandardAxis) bool {
+	if m := g.standardAxisMapping(axis); m.HasStandardLayout() {
+		return m.IsMapped()
+	}
+
 	g.m.Lock()
 	defer g.m.Unlock()
 
-	if gamepaddb.HasStandardLayoutMapping(g.sdlID) {
-		return gamepaddb.HasStandardAxis(g.sdlID, axis)
-	}
 	return g.native.standardAxisInOwnMapping(axis) != nil
 }
 
 // IsStandardButtonAvailable is concurrent safe.
 func (g *Gamepad) IsStandardButtonAvailable(button gamepaddb.StandardButton) bool {
+	if m := g.standardButtonMapping(button); m.HasStandardLayout() {
+		return m.IsMapped()
+	}
+
 	g.m.Lock()
 	defer g.m.Unlock()
 
-	if gamepaddb.HasStandardLayoutMapping(g.sdlID) {
-		return gamepaddb.HasStandardButton(g.sdlID, button)
-	}
 	return g.native.standardButtonInOwnMapping(button) != nil
 }
 
 // StandardAxisValue is concurrent-safe.
 func (g *Gamepad) StandardAxisValue(axis gamepaddb.StandardAxis) float64 {
-	if gamepaddb.HasStandardLayoutMapping(g.sdlID) {
-		// StandardAxisValue invokes g.Axis, g.Button, or g.Hat so this cannot be locked.
-		return gamepaddb.StandardAxisValue(g.sdlID, axis, g)
-	}
+	m := g.standardAxisMapping(axis)
 
 	g.m.Lock()
 	defer g.m.Unlock()
 
-	if m := g.native.standardAxisInOwnMapping(axis); m != nil {
-		return m.Value()*2 - 1
+	if m.HasStandardLayout() {
+		return m.AxisValue(gamepadUnderLock{g})
+	}
+	if mi := g.native.standardAxisInOwnMapping(axis); mi != nil {
+		return mi.Value()*2 - 1
 	}
 	return 0
 }
 
 // StandardButtonValue is concurrent-safe.
 func (g *Gamepad) StandardButtonValue(button gamepaddb.StandardButton) float64 {
-	if gamepaddb.HasStandardLayoutMapping(g.sdlID) {
-		// StandardButtonValue invokes g.Axis, g.Button, or g.Hat so this cannot be locked.
-		return gamepaddb.StandardButtonValue(g.sdlID, button, g)
-	}
+	m := g.standardButtonMapping(button)
 
 	g.m.Lock()
 	defer g.m.Unlock()
 
-	if m := g.native.standardButtonInOwnMapping(button); m != nil {
-		return m.Value()
+	if m.HasStandardLayout() {
+		return m.ButtonValue(gamepadUnderLock{g})
+	}
+	if mi := g.native.standardButtonInOwnMapping(button); mi != nil {
+		return mi.Value()
 	}
 	return 0
 }
 
 // IsStandardButtonPressed is concurrent-safe.
 func (g *Gamepad) IsStandardButtonPressed(button gamepaddb.StandardButton) bool {
-	if gamepaddb.HasStandardLayoutMapping(g.sdlID) {
-		// IsStandardButtonPressed invokes g.Axis, g.Button, or g.Hat so this cannot be locked.
-		return gamepaddb.IsStandardButtonPressed(g.sdlID, button, g)
-	}
+	m := g.standardButtonMapping(button)
 
 	g.m.Lock()
 	defer g.m.Unlock()
 
-	if m := g.native.standardButtonInOwnMapping(button); m != nil {
-		return m.Pressed()
+	if m.HasStandardLayout() {
+		return m.IsButtonPressed(gamepadUnderLock{g})
+	}
+	if mi := g.native.standardButtonInOwnMapping(button); mi != nil {
+		return mi.Pressed()
 	}
 	return false
 }
@@ -416,4 +551,18 @@ func (g *Gamepad) Vibrate(duration time.Duration, strongMagnitude float64, weakM
 	defer g.m.Unlock()
 
 	g.native.vibrate(duration, strongMagnitude, weakMagnitude)
+}
+
+// motorMagnitude converts a magnitude in the range 0 to 1 to a vibration motor magnitude.
+// Out-of-range values are clamped and NaN is treated as 0.
+func motorMagnitude(magnitude float64) uint16 {
+	// Converting an out-of-range or NaN value to uint16 is implementation-defined,
+	// so such values must be rejected before the conversion.
+	if !(magnitude > 0) {
+		return 0
+	}
+	if magnitude > 1 {
+		return 0xffff
+	}
+	return uint16(magnitude * 0xffff)
 }

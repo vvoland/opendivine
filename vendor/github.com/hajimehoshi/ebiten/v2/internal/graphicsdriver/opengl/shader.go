@@ -24,6 +24,7 @@ import (
 	"github.com/hajimehoshi/ebiten/v2/internal/graphicsdriver/opengl/gl"
 	"github.com/hajimehoshi/ebiten/v2/internal/shaderir"
 	"github.com/hajimehoshi/ebiten/v2/internal/shaderir/glsl"
+	"github.com/hajimehoshi/ebiten/v2/internal/shaderprecomp"
 )
 
 type Shader struct {
@@ -51,12 +52,19 @@ func (s *Shader) ID() graphicsdriver.ShaderID {
 }
 
 func (s *Shader) Dispose() {
-	s.graphics.context.deleteProgram(s.p)
+	s.graphics.deleteProgram(s.p)
 	s.graphics.removeShader(s)
 }
 
 func (s *Shader) compile() error {
-	vssrc, fssrc := glsl.Compile(s.ir, s.graphics.context.glslVersion())
+	version := s.graphics.context.glslVersion()
+
+	var vssrc, fssrc string
+	if vs, fs, ok := shaderprecomp.GLSL(s.ir.SourceID, version == glsl.GLSLVersionES300); ok {
+		vssrc, fssrc = string(vs), string(fs)
+	} else {
+		vssrc, fssrc = glsl.Compile(s.ir, version)
+	}
 
 	vs, err := s.graphics.context.newShader(gl.VERTEX_SHADER, vssrc)
 	if err != nil {
@@ -91,6 +99,7 @@ func (s *Shader) compile() error {
 		programInfo := s.graphics.context.ctx.GetProgramInfoLog(uint32(p))
 		vertexShaderInfo := s.graphics.context.ctx.GetShaderInfoLog(uint32(vs))
 		fragmentShaderInfo := s.graphics.context.ctx.GetShaderInfoLog(uint32(fs))
+		s.graphics.deleteProgram(p)
 		return fmt.Errorf("opengl: program error: %s\nvertex shader error: %s\nvertex shader source: %s\nfragment shader error: %s\nfragment shader source: %s",
 			programInfo, vertexShaderInfo, vssrc, fragmentShaderInfo, fssrc)
 	}
