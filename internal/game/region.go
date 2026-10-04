@@ -12,6 +12,7 @@ import (
 
 	"grono.dev/opendivine/internal/game/collision"
 	"grono.dev/opendivine/internal/game/mover"
+	"grono.dev/opendivine/pkg/assets/height"
 	"grono.dev/opendivine/pkg/assets/objects"
 	"grono.dev/opendivine/pkg/assets/world"
 )
@@ -35,6 +36,10 @@ func (g *Game) loadRegion(n int) error {
 	g.walkGrid = collision.NewGrid()
 	g.floorTiles = map[int16]*ebiten.Image{}
 	g.objSprites = map[int]*sprite{}
+
+	if err := g.loadHeights(n); err != nil {
+		return err
+	}
 
 	if err := world.Walk(worldBytes, func(cellX, cellY int, c world.Cell) {
 		hasFloor := c.FloorTileID != tileVoid
@@ -156,6 +161,31 @@ func (g *Game) loadRegion(n int) error {
 
 	log.Printf("region %d: %d floor cells, %d object instances, %d colliders",
 		n, len(g.cells), len(g.insts), len(g.colliders))
+	return nil
+}
+
+// loadHeights fills the fresh walkability grid's terrain layer from
+// static/height.x<n> (re_docs/cell-grid.md). It runs before the world's
+// objects are stamped: [collision.Grid.Stamp] measures a walk-on cube's climb
+// byte down from the base height, and the loader clears the climb bit on a
+// cell the map blocks, which a later stamp puts back
+// (TestLoadHeightsBeforeStamps).
+//
+// A missing or malformed file is fatal, as a missing world.x<n> is: 78,547 of
+// region 0's walls live in it and nothing else supplies them.
+func (g *Game) loadHeights(n int) error {
+	path := fmt.Sprintf("%s/main/startup/static/height.x%d", g.gameDir, n)
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("open height.x%d: %w", n, err)
+	}
+	defer f.Close()
+	hm, err := height.Decode(f)
+	if err != nil {
+		return fmt.Errorf("height.x%d: %w", n, err)
+	}
+	blocked, climb := g.walkGrid.LoadHeights(hm)
+	log.Printf("region %d: height map: %d cells blocked by the map, %d climb-gated", n, blocked, climb)
 	return nil
 }
 

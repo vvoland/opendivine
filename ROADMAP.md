@@ -15,8 +15,8 @@ to be one small, reviewable change; each cites the RE doc that specs it.
 - [ ] Engine-faithful collision — [formats/collide](re_docs/formats/collide.md)
   - [x] walkability cell grid: cube rasterization (inclusive rect stamp, masks from the object flags word, blocker refcount) — the engine has no per-move geometric test
   - [x] cell-granular mover blocking by mask; doors re-rasterize on use
-  - [x] `fcn.0056f3c0` walkability: DIR16 destination + corner/pass-through chains (cell-space test, `internal/game/mover`)
-  - [ ] the 80-unit climb gate in walkability (needs the height bytes from height.x)
+  - [x] `fcn.0056f3c0` walkability: DIR16 destination + corner/pass-through chains (cell-space test, `internal/game/collision`)
+  - [x] the 80-unit climb gate in walkability, fed by the loaded height bytes
   - [x] the 16-direction greedy leg stepper for the player: discrete occupancy cell + interpolated sprite, blocked-leg re-aim slide (`internal/game/mover`)
   - [ ] extend the stepper to NPCs and the blocked-leg full stop
   - [ ] pin the player-path mask (steppers use 0x13; we add the closed-door bit so closed doors block, unverified against the engine)
@@ -25,9 +25,11 @@ to be one small, reviewable change; each cites the RE doc that specs it.
   - [ ] A*: 8-dir, displacement-derived costs, 80-unit climb cap
   - [ ] click-to-walk uses the planner (replace straight-line + wall slide)
   - [ ] reach tests for interaction/combat use the walkability tester
-- [ ] Height map — [formats/world](re_docs/formats/world.md)
-  - [ ] load `height.x<n>`; per-cell height query
-  - [ ] terrain elevation feeds rendering and collision
+- [ ] Height map — [formats/world](re_docs/formats/world.md), [cell-grid](re_docs/cell-grid.md)
+  - [x] load `height.x<n>`; per-cell height query
+  - [x] terrain feeds collision: `loadRegion` → `Grid.LoadHeights`, the base height per cell, the climb bit derived from it (140,170 cells in region 0) and the map's own blockers (78,547) — the only walls no object record supplies
+  - [ ] give the rasterizer the walk-on cubes' height: `region.go` builds every `collision.Cube` with `ZHeight`/`BaseZ` at 0, so a cube's climb byte is always 0 in game and only terrain can trip the gate. The collide record's `ZHeight` (i16[4]) is decoded and could be passed; `BaseZ` is the open half — [render-trace](re_docs/render-trace.md) gives `elevation = collide[catId].z_height + (layer & 0x3ff)` for a placed object, and `layer` is already decoded (`objectInst.Layer`), but that formula belongs to `0x0059fee0`'s elevation query, and that `0x0056d720` feeds the same sum into cell+6 when it stamps is not stated anywhere
+  - [ ] terrain elevation feeds rendering (`screen_Y = worldY − byte7·4`, [render-trace](re_docs/render-trace.md))
 
 ## 1. World completeness
 
