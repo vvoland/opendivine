@@ -288,6 +288,28 @@ bucket — the height.x record layout is specced across this doc,
 [world.md](formats/world.md); a planned `formats/height.md` was never
 written.
 
+The saved flags word is read and then almost entirely discarded — the
+loader keeps exactly one bit of it ([cell-grid.md](cell-grid.md)):
+
+```c
+cell[7] = fgetc();
+if (cell[7] != 0) cell.flags |= 0x400;      // climb bit, DERIVED
+saved = fread2();
+if (saved & 0x200) {                        // the one kept bit
+    cell.flags |= 0x201;                    // hard block + refcount
+    cell.flags &= ~0x400;
+    cell.refcount++;
+}
+```
+
+So the climb bit `0x400` is derived from the height byte rather than
+restored from the file, a saved `0x200` hard-blocks its cell with a
+blocker refcount of its own, and every other saved bit is rebuilt by
+rasterizing the map's objects at placement.  The file is one 3-byte
+record per cell of the 2,099,200-cell grid, so every shipped
+`height.x<n>` is exactly 6,297,600 bytes — and a map loaded without it
+starts with no blockers at all where no object record supplies one.
+
 **Crucially**: `height` is the **terrain elevation** only — 0 for
 ~93% of cells, non-zero only on cliffs/terraces (16, 20, 32, 40, 48,
 61, 62 are the only observed non-zero values).  It does NOT carry

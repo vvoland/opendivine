@@ -30,7 +30,7 @@ formats and the dispatch, not just inline code.
 - [screen-effects.md](screen-effects.md) — full-screen post-process transformations (poison/ice/ring).
 - [sprite-builders.md](sprite-builders.md) — procedural particle-pattern builders (spiral/ring/pulse) for spell visuals.
 - [weather.md](weather.md) — `CWeather` rain/storm + `CWeatherAction` lightning flashes.
-- [cell-grid.md](cell-grid.md) — the `Cell.cpp` broad-phase spatial index (area/direction queries).
+- [cell-grid.md](cell-grid.md) — the world cell grid: the 8-byte cell record, its flag bits, `height.x<n>` and the query layer over it.
 - [pathfinding.md](pathfinding.md) — A* navigation (half-cell grid, 8-dir).
 
 ## Core loop & dispatch

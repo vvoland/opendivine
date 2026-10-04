@@ -184,6 +184,14 @@ mask, not on `type`; gating on `type ≠ 0` silently drops roughly half
 the walls (24,921 of 57,320 stamped cubes in `world.x0` are type-0 hard
 blockers) and lets the player walk through them.
 
+One more blocker source is not an object at all. `height.x<n>`'s saved
+bit 9 (`0x200`) hard-blocks its cell outright — `flags |= 0x201`, the
+climb bit cleared again, and a blocker refcount of its own — which is
+how a map walls off cells that no object record covers
+([`../render-trace.md`](../render-trace.md), the loader). It is a
+refcounted blocker like any other, so unstamping an object that shares
+the cell leaves the map's own block standing.
+
 Door/lever state changes **re-run remove+add** — that is how "locked
 doors block" works. The map loader also sets bit `0x1` directly for
 cells whose record `word[+4] ≠ 0` (`0x59cfa0`).
