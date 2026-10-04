@@ -5,8 +5,12 @@
 // each placed object's collide cube is RASTERIZED into a cell-flag
 // grid at placement (an inclusive rectangle in iso cell space), and
 // movers test whole cells by flag mask. Doors change state by
-// re-rasterizing with a new mask.
+// re-rasterizing with a new mask. The grid also carries the map's terrain
+// heights ([Grid.LoadHeights]) and the engine's walkability test
+// ([Grid.WalkableUV]).
 package collision
+
+import "grono.dev/opendivine/pkg/assets/height"
 
 // Cell-flag bits, as stamped by the engine's rasterizer and tested by
 // its walkability function (fcn.0056f3c0). Movers test with
@@ -19,6 +23,7 @@ const (
 	MaskAgent       uint16 = 0x0010 // an agent's leg-destination occupancy
 	MaskLight       uint16 = 0x0080 // sb_light
 	MaskLever       uint16 = 0x0100 // sb_lever
+	MaskSaved       uint16 = 0x0200 // the map's own blocker (see [Grid.LoadHeights])
 	MaskWalkOn      uint16 = 0x0400 // sb_walk_on climb cells (height-gated)
 )
 
@@ -29,6 +34,62 @@ const MoverMask = MaskStatic | MaskPlayerBlock | MaskAgent
 // gridMax is the engine's valid-index bound (index <= 0x200800 gates
 // every grid access).
 const gridMax = 0x200800
+
+// ClimbLimit is the engine's step-up limit, `cmp …,0x50` — 80 height
+// units. A walk-on cell rising more than this above the cell being
+// stepped out of is rejected outright, not costed (re_docs/pathfinding.md).
+const ClimbLimit = 0x50
+
+// Step is one entry of the engine's 16-direction isometric step table
+// (DAT_00654e50, `{i32 du, i32 dv} × 16`) in cell space — the table the
+// walkability test, the steppers and the A* core all index.
+type Step struct{ Du, Dv int }
+
+// Dir16 is that table, direction 0 = N rotating clockwise
+// (re_docs/formats/collide.md). The steps are isometric rather than square
+// 8-way, so the 8 odd entries are the half-step intermediates that cover
+// more than one cell per leg.
+var Dir16 = [16]Step{
+	0:  {Du: -1, Dv: -1}, // N
+	1:  {Du: -3, Dv: -2},
+	2:  {Du: -2, Dv: -1},
+	3:  {Du: -3, Dv: -1},
+	4:  {Du: -1, Dv: 0}, // W
+	5:  {Du: -1, Dv: 1},
+	6:  {Du: 0, Dv: 1},
+	7:  {Du: 1, Dv: 2},
+	8:  {Du: 1, Dv: 1}, // S
+	9:  {Du: 3, Dv: 2},
+	10: {Du: 2, Dv: 1},
+	11: {Du: 3, Dv: 1},
+	12: {Du: 1, Dv: 0}, // E
+	13: {Du: 1, Dv: -1},
+	14: {Du: 0, Dv: -1},
+	15: {Du: -1, Dv: -2},
+}
+
+// corners[i] are the extra cell offsets (Δu, Δv) that direction i's leg
+// passes through and that must be clear too, on top of its destination: the
+// engine's 16-case switch at 0x5719a8 inside fcn.0056f3c0
+// (re_docs/formats/collide.md). Directions 4/6/12/13/14 are "dest only".
+var corners = [16][][2]int{
+	0:  {{-1, -1}, {-1, 0}},
+	1:  {{-2, -2}, {-2, -1}, {-1, -1}, {-1, 0}, {-2, 0}, {0, -1}},
+	2:  {{-1, -1}, {-1, 0}},
+	3:  {{-2, -1}, {-1, -1}, {-1, 0}},
+	4:  nil,
+	5:  {{-1, 0}, {0, 1}},
+	6:  nil,
+	7:  {{1, 1}, {0, 1}, {1, 0}},
+	8:  {{0, 1}, {1, 0}},
+	9:  {{2, 2}, {2, 1}, {2, 0}, {1, 0}, {1, 1}},
+	10: {{1, 1}, {0, 1}, {1, 0}},
+	11: {{2, 1}, {1, 1}, {1, 0}, {2, 0}, {3, 0}, {0, 1}},
+	12: nil,
+	13: nil,
+	14: nil,
+	15: {{-1, -1}, {0, -1}},
+}
 
 // Grid is the walkability grid: the engine's worldmap cell array
 // ([0x74eca0]) reduced to the fields movement needs. Cells are
@@ -42,6 +103,11 @@ type Grid struct {
 	// stamps with MaskStatic|MaskPlayerBlock increment it, removals
 	// decrement, and flag bits clear only when it reaches zero.
 	blockRef []uint8
+	// climb and base are the cell's height bytes, cell+6 and cell+7 of the
+	// engine's 8-byte cell record (re_docs/cell-grid.md): the walk-on object
+	// add-on in quarter-units and the terrain height.
+	climb []uint8
+	base  []uint8
 }
 
 // NewGrid returns an empty walkability grid.
@@ -49,6 +115,8 @@ func NewGrid() *Grid {
 	return &Grid{
 		flags:    make([]uint16, gridMax+1),
 		blockRef: make([]uint8, gridMax+1),
+		climb:    make([]uint8, gridMax+1),
+		base:     make([]uint8, gridMax+1),
 	}
 }
 
@@ -89,15 +157,129 @@ func (g *Grid) BlockedUV(u, v int, mask uint16) bool {
 }
 
 // Blocked reports whether the cell containing world (x, y) has any of
-// the mask bits set — the walkability core (destination-cell test of
-// fcn.0056f3c0; the per-direction corner chains and the climb gate
-// belong to the leg stepper and are not modelled yet).
+// the mask bits set — the plain single-cell test. A move is validated
+// with [Grid.WalkableUV], which adds the direction's corner chain and
+// the climb gate.
 func (g *Grid) Blocked(x, y int, mask uint16) bool {
 	idx, ok := cellIndex(x, y)
 	if !ok {
 		return true // out of the engine's grid = not walkable
 	}
 	return g.flags[idx]&mask != 0
+}
+
+// cellInBounds is fcn.0056f3c0's entry gate on the cell the test is
+// called with: coordinates at least 4, and the iso extents (u−v)*32 <
+// 0x7f00 and v*32 < 0xff00, which are the world-pixel extents
+// (re_docs/pathfinding.md). The A* core bounds-checks its own nodes.
+func cellInBounds(u, v int) bool {
+	return u >= 4 && v >= 4 && (u-v)*32 < 0x7f00 && v*32 < 0xff00
+}
+
+// LoadHeights writes the grid's terrain layer from a decoded height.x<n> —
+// the engine's per-cell loader (FUN_0056d260), the only thing that fills the
+// base byte and the only blocker source that is not an object
+// (re_docs/cell-grid.md):
+//
+//	cell[7] = height
+//	if (cell[7] != 0)  flags |= 0x400
+//	if (saved & 0x200) { flags |= 0x201; flags &= ~0x400; refcount++ }
+//
+// So raised terrain is climb-gated by construction (the file's own 0x400 is
+// a stale editor bit), and a map-blocked cell outranks that with a refcount
+// of its own.
+//
+// It must run before the objects are stamped: [Grid.Stamp] measures a walk-on
+// cube's climb byte down from the base height and puts back the climb bit this
+// clears on a blocker cell (TestLoadHeightsBeforeStamps). Both sides index by
+// v<<10 + u, so cell i of the file is cell i of the grid. It returns what it
+// wrote — cells blocked, and cells left climb-gated — which the stamps that
+// follow would blur.
+func (g *Grid) LoadHeights(m *height.Map) (blocked, climb int) {
+	for i, h := range m.Heights {
+		g.base[i] = h
+		if h != 0 {
+			g.flags[i] |= MaskWalkOn
+		}
+		if m.Blocker(i) {
+			g.flags[i] |= MaskStatic | MaskSaved
+			g.flags[i] &^= MaskWalkOn
+			if g.blockRef[i] < 255 {
+				g.blockRef[i]++
+			}
+			blocked++
+		} else if h != 0 {
+			climb++
+		}
+	}
+	return blocked, climb
+}
+
+// SetHeightsUV sets cell (u, v)'s climb and base height bytes — how a test
+// supplies the map's relief directly, without a height.x<n>.
+func (g *Grid) SetHeightsUV(u, v int, climb, base uint8) {
+	idx := v<<10 + u
+	if idx < 0 || idx > gridMax {
+		return
+	}
+	g.climb[idx], g.base[idx] = climb, base
+}
+
+// HeightsUV returns cell (u, v)'s climb and base height bytes, both zero
+// outside the grid.
+func (g *Grid) HeightsUV(u, v int) (climb, base uint8) {
+	idx := v<<10 + u
+	if idx < 0 || idx > gridMax {
+		return 0, 0
+	}
+	return g.climb[idx], g.base[idx]
+}
+
+// WalkableUV reports whether a leg in direction dir out of cell (u, v) is
+// allowed — fcn.0056f3c0, the one gate movement shares with the A* core
+// and the reach tests. It checks the bounds gate, the destination cell
+// Dir16[dir] and every corner cell of the chain: each is rejected on the
+// mask blocker bits and, on a walk-on cell, on the climb gate.
+func (g *Grid) WalkableUV(u, v, dir int, mask uint16) bool {
+	if !cellInBounds(u, v) {
+		return false
+	}
+	d := Dir16[dir]
+	if !g.stepInto(u, v, u+d.Du, v+d.Dv, mask) {
+		return false
+	}
+	for _, c := range corners[dir] {
+		if !g.stepInto(u, v, u+c[0], v+c[1], mask) {
+			return false
+		}
+	}
+	return true
+}
+
+// stepInto tests one examined cell of a leg leaving (u, v): the blocker bits,
+// then — on a walk-on cell — the climb gate:
+//
+//	delta = (height0 + height1) − current_height;  delta > 0x50: reject
+//
+// The neighbour contributes both of its height bytes and the cell being left
+// only its climb byte (re_docs/formats/collide.md, re_docs/pathfinding.md).
+func (g *Grid) stepInto(u, v, nu, nv int, mask uint16) bool {
+	n := nv<<10 + nu
+	if n < 0 || n > gridMax {
+		return false // out of the engine's grid = not walkable
+	}
+	f := g.flags[n]
+	if f&mask != 0 {
+		return false
+	}
+	if f&MaskWalkOn == 0 {
+		return true
+	}
+	var cur uint8
+	if idx := v<<10 + u; idx >= 0 && idx <= gridMax {
+		cur = g.climb[idx]
+	}
+	return int(g.climb[n])+int(g.base[n])-int(cur) <= ClimbLimit
 }
 
 // Cube is one object's stamp parameters, kept so the object can
@@ -107,7 +289,14 @@ type Cube struct {
 	X, Y    int // object world position + collide record anchor_x/anchor_y
 	XExtent int // collide i16[3]: spans the iso u axis
 	Width   int // collide i16[5]: width/2 spans the v axis
-	Mask    uint16
+
+	// ZHeight is the collide record's z_height (i16[4]), the z extent of the
+	// cube's slab; BaseZ is the object's own ground Z, added to it. Only
+	// walk-on cubes read them, to work out how high the step onto them is.
+	ZHeight int
+	BaseZ   int
+
+	Mask uint16
 }
 
 // cells calls fn for every cell of the cube's inclusive rectangle,
@@ -151,6 +340,16 @@ func (g *Grid) Stamp(c Cube) {
 		g.flags[idx] |= c.Mask
 		if c.Mask&(MaskStatic|MaskPlayerBlock) != 0 && g.blockRef[idx] < 255 {
 			g.blockRef[idx]++
+		}
+		// A walk-on cube records how high the step onto it is, in
+		// quarter-units, keeping the tallest contributor (fcn.0056d720):
+		// byte[+6] = (h − 4·byte[+7] + 3) >> 2, with h = z_height + baseZ.
+		// The byte store wraps for a cube over 1020 units tall, as the
+		// original's does.
+		if c.Mask&MaskWalkOn != 0 {
+			if d := c.ZHeight + c.BaseZ - 4*int(g.base[idx]); d > 4*int(g.climb[idx]) {
+				g.climb[idx] = uint8((d + 3) >> 2)
+			}
 		}
 	})
 }

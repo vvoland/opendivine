@@ -119,3 +119,110 @@ func TestOutOfGrid(t *testing.T) {
 		t.Error("negative-index cell walkable, want blocked")
 	}
 }
+
+// stampCellUV stamps a single-cell cube carrying mask at cell (u, v):
+// x+y = u·32 and y = v·32 puts the rasterizer's rectangle on exactly it.
+func stampCellUV(g *Grid, u, v int, mask uint16) {
+	g.Stamp(Cube{X: (u - v) * 32, Y: v * 32, Mask: mask})
+}
+
+// TestClimbGate pins the 80-unit climb limit: exactly at it is still a
+// step, one unit more is a cliff.
+//
+// The last two cases pin which byte `current_height` is. The gate
+// subtracts the climb byte of the cell being left alone, so its terrain
+// byte counts for nothing no matter how high it stands; subtracting both
+// would make the raised-terrain case walkable (see [Grid.stepInto] for
+// what the reading costs on the shipped maps).
+func TestClimbGate(t *testing.T) {
+	const u, v = 200, 100
+	tests := []struct {
+		name              string
+		curClimb, curBase uint8
+		nClimb, nBase     uint8
+		wantWalkable      bool
+	}{
+		{name: "level walk-on cell", wantWalkable: true},
+		{name: "step of exactly the limit", nClimb: 80, wantWalkable: true},
+		{name: "one unit over the limit", nClimb: 81},
+		{name: "limit split across both height bytes", nClimb: 40, nBase: 41},
+		{name: "step down off a tall cell", curClimb: 200, nClimb: 10, wantWalkable: true},
+		// Standing on terrain twice as high as the cell ahead does not
+		// help: the base byte of the cell being left is not in the sum.
+		{name: "raised terrain under the cell being left counts for nothing", curBase: 200, nBase: 100},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			g := NewGrid()
+			// Direction 12 is the pure +u step and is "dest only", so
+			// nothing but the destination cell can decide this test.
+			stampCellUV(g, u+1, v, MaskWalkOn)
+			g.SetHeightsUV(u, v, tc.curClimb, tc.curBase)
+			g.SetHeightsUV(u+1, v, tc.nClimb, tc.nBase)
+			if got := g.WalkableUV(u, v, 12, MoverMask); got != tc.wantWalkable {
+				t.Errorf("WalkableUV over a walk-on cell (climb %d, base %d; from climb %d, base %d) = %v, want %v",
+					tc.nClimb, tc.nBase, tc.curClimb, tc.curBase, got, tc.wantWalkable)
+			}
+		})
+	}
+}
+
+// TestWalkableCornerChain checks the corner/pass-through chain: a blocker
+// in a cell the leg only clips past still cancels it, so a diagonal cannot
+// cut a wall corner. Direction 8 examines Δ(0,1) and Δ(1,0) besides its
+// destination; direction 12 examines nothing but its destination.
+func TestWalkableCornerChain(t *testing.T) {
+	const u, v = 200, 100
+	g := NewGrid()
+	stampCellUV(g, u+1, v, MaskStatic) // a corner cell of dir 8, dest of dir 12
+	if g.WalkableUV(u, v, 8, MoverMask) {
+		t.Error("dir 8 walkable with its Δ(1,0) corner cell blocked")
+	}
+	if g.WalkableUV(u, v, 12, MoverMask) {
+		t.Error("dir 12 walkable into a blocked destination cell")
+	}
+	if !g.WalkableUV(u, v, 6, MoverMask) { // (0,1), dest only, clear
+		t.Error("dir 6 not walkable although its destination is clear")
+	}
+}
+
+// TestStampClimbHeight pins the rasterizer's climb-height write: a walk-on
+// cube records (h − 4·base + 3) >> 2 in quarter-units, keeping the tallest
+// contributor.
+func TestStampClimbHeight(t *testing.T) {
+	g := NewGrid()
+	const u, v = 300, 120
+	x, y := (u-v)*32, v*32
+	g.Stamp(Cube{X: x, Y: y, ZHeight: 148, Mask: MaskWalkOn})
+	if climb, _ := g.HeightsUV(u, v); climb != 37 { // (148+3)>>2
+		t.Errorf("climb byte = %d, want 37", climb)
+	}
+	g.Stamp(Cube{X: x, Y: y, ZHeight: 8, Mask: MaskWalkOn}) // shorter, ignored
+	if climb, _ := g.HeightsUV(u, v); climb != 37 {
+		t.Errorf("a shorter walk-on cube lowered the climb byte to %d, want 37", climb)
+	}
+	g.Stamp(Cube{X: x, Y: y, ZHeight: 200, BaseZ: 200, Mask: MaskWalkOn})
+	if climb, _ := g.HeightsUV(u, v); climb != 100 { // (200+200+3)>>2
+		t.Errorf("climb byte = %d, want 100", climb)
+	}
+	// A cube with no walk-on bit never touches the height bytes.
+	g2 := NewGrid()
+	g2.Stamp(Cube{X: x, Y: y, ZHeight: 148, Mask: MaskStatic})
+	if climb, _ := g2.HeightsUV(u, v); climb != 0 {
+		t.Errorf("non-walk-on cube wrote climb byte %d, want 0", climb)
+	}
+}
+
+// TestWalkableBoundsGate covers fcn.0056f3c0's entry gate.
+func TestWalkableBoundsGate(t *testing.T) {
+	g := NewGrid()
+	if g.WalkableUV(3, 100, 12, MoverMask) {
+		t.Error("cell u=3 walkable, want the bounds gate to reject it")
+	}
+	if g.WalkableUV(100, 3, 12, MoverMask) {
+		t.Error("cell v=3 walkable, want the bounds gate to reject it")
+	}
+	if !g.WalkableUV(4, 4, 12, MoverMask) {
+		t.Error("cell (4,4) not walkable, want the gate to admit it")
+	}
+}
