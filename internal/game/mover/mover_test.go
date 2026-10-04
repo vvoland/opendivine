@@ -9,16 +9,18 @@ import (
 	"grono.dev/opendivine/internal/game/collision"
 )
 
-// TestDirTableConsistent locks the velocity table against the cell-step
-// table: per-leg world delta is (32·(Du−Dv), 32·Dv) and the per-frame
-// velocity is that delta over Walkcount, i.e. ((Du−Dv)/Factor, Dv/Factor).
+// TestDirTableConsistent locks the velocity table (0x654f50) against the
+// cell-step table (0x654e50, collision.Dir16): per-leg world delta is
+// (32·(Du−Dv), 32·Dv) and the per-frame velocity is that delta over
+// Walkcount, i.e. ((Du−Dv)/Factor, Dv/Factor).
 func TestDirTableConsistent(t *testing.T) {
-	for i, d := range dir16 {
-		wantVx := float64(d.Du-d.Dv) / float64(d.Factor)
-		wantVy := float64(d.Dv) / float64(d.Factor)
-		if d.Vx != wantVx || d.Vy != wantVy {
+	for i, v := range vel16 {
+		d := collision.Dir16[i]
+		wantVx := float64(d.Du-d.Dv) / float64(v.Factor)
+		wantVy := float64(d.Dv) / float64(v.Factor)
+		if v.Vx != wantVx || v.Vy != wantVy {
 			t.Errorf("dir %d: Vx,Vy = (%.2f,%.2f), want (%.2f,%.2f) from Du,Dv=%d,%d factor=%d",
-				i, d.Vx, d.Vy, wantVx, wantVy, d.Du, d.Dv, d.Factor)
+				i, v.Vx, v.Vy, wantVx, wantVy, d.Du, d.Dv, v.Factor)
 		}
 	}
 }
