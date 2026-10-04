@@ -126,11 +126,14 @@ pairs, with a 256-byte reverse table built at construction.
 This page also carries the cell-manager citations: `fcn.00571fa0` is the
 constructor (`.\WORLD\Cell.cpp`, loading-screen status "Loading cell
 manager"), `fcn.005706d0` the coordinate→cell helper (clamps to grid
-bounds), `fcn.005709e0` an area query that accumulates into the scratch
-list at `0x74cca0` (built with `fcn.0056fd50` add / `fcn.0056fe20`
-clear), and `fcn.005719f0` a directional variant over the quadrant table
-at `0x74cba0`. The constructor's other allocation is a node/record pool
-of `0xdffe4` bytes.
+bounds), and `fcn.005719f0` a directional walk over the quadrant table
+at `0x74cba0`. The array is the same `[0x74eca0]` grid the A* core
+`FUN_005709e0` searches and the same one the LOS walk reads
+([`pathfinding.md`](pathfinding.md)), and the constructor's other
+allocation — the node/record pool of `0xdffe4` bytes — is that core's
+node pool. The scratch list at `0x74cca0` (`fcn.0056fd50` add /
+`fcn.0056fe20` clear) is where a cell query's hits accumulate; which of
+the functions above fills it is NOT reconciled.
 
 > **The earlier reading of this page — a `1024 × 1024` grid of 16-byte
 > cells, each holding the head of a per-cell bucket list of the objects
@@ -139,8 +142,9 @@ of `0xdffe4` bytes.
 > `0x200801` gate ([`render-trace.md`](render-trace.md)), and with the
 > walkability grid, which reads flags at `+2` and the two height bytes at
 > `+6`/`+7` ([`formats/collide.md`](formats/collide.md)). An 8-byte cell
-> has no room for a bucket-list head, so what these queries gather is NOT
-> reconciled — only the citations above are kept.
+> has no room for a bucket-list head, so the "area query" role this page
+> gave `fcn.005709e0` goes with it: that function is the A* core
+> [`pathfinding.md`](pathfinding.md) documents.
 
 ## Status
 
@@ -154,7 +158,8 @@ of `0xdffe4` bytes.
 - The loader's one-bit restore ✅.
 - The A* scratch, its cap and its stamp wrap ✅.
 - The query layer's role 🟡 — the citations above are kept, the
-  bucket-list reading of them is retracted and nothing replaces it.
+  bucket-list reading of them is retracted, and `fcn.005709e0` is the A*
+  core of [pathfinding.md](pathfinding.md) rather than an area query.
 - Bits 5 and 6's meaning 🟡 — their sole writer is identified; what
   distinguishes them is not.
 - The 16-entry neighbour table's ordering convention 🟡 — the table and
