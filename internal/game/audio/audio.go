@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"sync"
@@ -47,6 +48,7 @@ func Context() *audio.Context {
 type MusicManager struct {
 	tracks   []musicdat.Track
 	ambients []musicdat.Track
+	zones    []musicdat.Zone
 	byLabel  map[string]musicdat.Track
 
 	arcFile *os.File
@@ -88,6 +90,7 @@ func newMusicManager(gamedataDir string) (*MusicManager, error) {
 	m := &MusicManager{
 		tracks:   md.Tracks,
 		ambients: md.Ambients,
+		zones:    md.Zones,
 		byLabel:  make(map[string]musicdat.Track, len(md.Tracks)+len(md.Ambients)),
 		arcFile:  arcFile,
 		arc:      arc,
@@ -107,10 +110,15 @@ func newMusicManager(gamedataDir string) (*MusicManager, error) {
 var ErrUnknownTrack = errors.New("audio: unknown music track")
 
 // PlayMusic stops any currently playing music and starts the named
-// track. If loop is true the stream restarts on completion. label
-// must be one of the music.dat labels (tracks and ambients share a
+// track at volume in [0, 1].
+// If loop is true the stream restarts on completion.
+// Label must be one of the music.dat labels (tracks and ambients share a
 // flat namespace).
-func (m *MusicManager) PlayMusic(label string, loop bool) error {
+func (m *MusicManager) PlayMusic(label string, loop bool, volume float64) error {
+	if math.IsNaN(volume) || volume < 0 || volume > 1 {
+		return fmt.Errorf("audio: invalid music volume %v", volume)
+	}
+
 	t, ok := m.byLabel[label]
 	if !ok {
 		return fmt.Errorf("%w: %q", ErrUnknownTrack, label)
@@ -132,6 +140,8 @@ func (m *MusicManager) PlayMusic(label string, loop bool) error {
 	if err != nil {
 		return fmt.Errorf("audio player: %w", err)
 	}
+
+	pl.SetVolume(volume)
 
 	m.mu.Lock()
 	old := m.cur

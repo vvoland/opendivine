@@ -77,11 +77,21 @@ func Run(cfg Config) error {
 	ebiten.SetWindowTitle("OpenDivine")
 	ebiten.SetWindowResizingMode(ebiten.WindowResizingModeEnabled)
 
+	music, err := audio.NewMusicManager(cfg.GamedataDir)
+	if err != nil {
+		log.Printf("audio init: %v (continuing silently)", err)
+	} else {
+		defer music.Close()
+	}
+
 	if cfg.SkipMenu {
 		g, err := New(cfg)
 		if err != nil {
 			return err
 		}
+
+		g.startRegionMusic(music)
+
 		return ebiten.RunGame(&shell{current: gameScreen{g: g}})
 	}
 
@@ -92,10 +102,7 @@ func Run(cfg Config) error {
 		menu.Backdrop = back
 	}
 
-	music, err := audio.NewMusicManager(cfg.GamedataDir)
-	if err != nil {
-		log.Printf("audio init: %v (continuing silently)", err)
-	} else {
+	if music != nil {
 		label := cfg.MenuMusic
 		if label == "" {
 			tracks := music.Tracks()
@@ -104,7 +111,7 @@ func Run(cfg Config) error {
 			}
 		}
 		if label != "" {
-			if err := music.PlayMusic(label, true); err != nil {
+			if err := music.PlayMusic(label, true, 1); err != nil {
 				log.Printf("menu music: %v", err)
 			} else {
 				log.Printf("menu music: playing track %q", label)
@@ -116,8 +123,8 @@ func Run(cfg Config) error {
 	return ebiten.RunGame(sh)
 }
 
-// menuScreen adapts mainmenu.Menu to Screen, owns the music player,
-// and handles transitions out of the menu.
+// menuScreen adapts mainmenu.Menu to Screen and handles transitions out of it.
+// Run owns the music manager across menu and world playback.
 type menuScreen struct {
 	menu  *mainmenu.Menu
 	music *audio.MusicManager // may be nil if audio init failed
@@ -127,8 +134,6 @@ type menuScreen struct {
 func (s *menuScreen) stopMusic() {
 	if s.music != nil {
 		s.music.Stop()
-		_ = s.music.Close()
-		s.music = nil
 	}
 }
 
@@ -147,6 +152,9 @@ func (s *menuScreen) Update() (Screen, error) {
 			log.Printf("new game: %v", err)
 			return nil, nil
 		}
+
+		g.startRegionMusic(s.music)
+
 		return gameScreen{g: g}, nil
 	case mainmenu.ActionResume,
 		mainmenu.ActionLoadGame,

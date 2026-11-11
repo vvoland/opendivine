@@ -18,27 +18,37 @@ import (
 )
 
 // Named-region tables span worlds and are independent of world.x<n> loads.
-// Keep the unverified parser opt-in so a bad table cannot prevent exploring.
+// Missing or malformed tables must not prevent world exploration.
 func (g *Game) loadNamedRegions() {
 	g.namedRegionsLoaded = true
 	for n := range g.namedRegions {
-		name := fmt.Sprintf("region.%03d", n)
-
-		data, err := os.ReadFile(filepath.Join(g.gameDir, "global", name))
-		if err != nil {
-			log.Printf("named regions: %s: %v", name, err)
-			continue
+		if err := g.loadNamedRegion(n); err != nil {
+			log.Printf("named regions: %v", err)
 		}
-
-		table, err := region.Decode(bytes.NewReader(data))
-		if err != nil {
-			log.Printf("named regions: %s: %v", name, err)
-			continue
-		}
-
-		g.namedRegions[n] = table
-		log.Printf("named regions: %s: %s, %d records", name, table.Tag, len(table.Records))
 	}
+}
+
+func (g *Game) loadNamedRegion(n int) error {
+	if g.namedRegions[n] != nil {
+		return nil
+	}
+
+	name := fmt.Sprintf("region.%03d", n)
+
+	data, err := os.ReadFile(filepath.Join(g.gameDir, "global", name))
+	if err != nil {
+		return fmt.Errorf("read %s: %w", name, err)
+	}
+
+	table, err := region.Decode(bytes.NewReader(data))
+	if err != nil {
+		return fmt.Errorf("decode %s: %w", name, err)
+	}
+
+	g.namedRegions[n] = table
+	log.Printf("named regions: %s: %s, %d records", name, table.Tag, len(table.Records))
+
+	return nil
 }
 
 type regionOverlay struct {

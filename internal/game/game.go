@@ -5,6 +5,7 @@ package game
 import (
 	"github.com/hajimehoshi/ebiten/v2"
 
+	"grono.dev/opendivine/internal/game/audio"
 	"grono.dev/opendivine/internal/game/character"
 	"grono.dev/opendivine/internal/game/collision"
 	"grono.dev/opendivine/internal/game/mover"
@@ -59,6 +60,7 @@ type Game struct {
 
 	namedRegions       [8]*region.File
 	namedRegionsLoaded bool
+	music              *audio.RegionMusic
 }
 
 func (g *Game) Layout(outsideWidth, outsideHeight int) (int, int) {

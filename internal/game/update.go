@@ -170,6 +170,9 @@ func (g *Game) Update() error {
 			g.zoom = 4.0
 		}
 	}
+
+	g.updateRegionMusic()
+
 	return nil
 }
 
