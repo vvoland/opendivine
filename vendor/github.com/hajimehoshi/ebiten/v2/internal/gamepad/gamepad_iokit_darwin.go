@@ -28,10 +28,17 @@ import (
 )
 
 type nativeGamepadsIOKit struct {
-	hidManager      _IOHIDManagerRef
+	hidManager _IOHIDManagerRef
+
+	// devicesToAdd and devicesToRemove hold one reference per entry, which update releases or hands
+	// over to the gamepad.
 	devicesToAdd    []_IOHIDDeviceRef
 	devicesToRemove []_IOHIDDeviceRef
 	devicesMu       sync.Mutex
+
+	// deferredDevices maps devices claimed by GameController to their I/O Registry entry IDs
+	// (zero if unavailable), holding one reference per device until fallback registration or disconnection.
+	deferredDevices map[_IOHIDDeviceRef]uint64
 }
 
 // theIOKitGamepads is the running IOKit backend. The C device callbacks reference
@@ -126,17 +133,28 @@ func (g *nativeGamepadsIOKit) init(gamepads *gamepads) error {
 	return nil
 }
 
+// ebitenGamepadMatchingCallback queues device for update to register. device is only guaranteed to
+// stay valid during the callback, so the queued entry takes a reference.
 func ebitenGamepadMatchingCallback(ctx unsafe.Pointer, res _IOReturn, sender unsafe.Pointer, device _IOHIDDeviceRef) {
 	n := theIOKitGamepads
 	n.devicesMu.Lock()
 	defer n.devicesMu.Unlock()
+
+	_CFRetain(_CFTypeRef(device))
 	n.devicesToAdd = append(n.devicesToAdd, device)
 }
 
+// ebitenGamepadRemovalCallback queues device for update to unregister. The queued entry takes a
+// reference.
 func ebitenGamepadRemovalCallback(ctx unsafe.Pointer, res _IOReturn, sender unsafe.Pointer, device _IOHIDDeviceRef) {
 	n := theIOKitGamepads
 	n.devicesMu.Lock()
 	defer n.devicesMu.Unlock()
+
+	// update only compares the entry with the gamepads by identity, but the reference keeps the
+	// address from being reused by a device queued for registration before the removal is applied,
+	// which would make the comparison match the new device's gamepad.
+	_CFRetain(_CFTypeRef(device))
 	n.devicesToRemove = append(n.devicesToRemove, device)
 }
 
@@ -145,13 +163,55 @@ func (g *nativeGamepadsIOKit) update(gamepads *gamepads) error {
 	defer g.devicesMu.Unlock()
 
 	for _, device := range g.devicesToAdd {
-		g.addDevice(device, gamepads)
+		if _, ok := g.deferredDevices[device]; ok {
+			_CFRelease(_CFTypeRef(device))
+			continue
+		}
+		if gcSupportsHIDDevice(device) {
+			if g.deferredDevices == nil {
+				g.deferredDevices = map[_IOHIDDeviceRef]uint64{}
+			}
+			g.deferredDevices[device] = hidDeviceRegistryID(device)
+			continue
+		}
+		if !g.addDevice(device, gamepads) {
+			// No gamepad took over the entry's reference.
+			_CFRelease(_CFTypeRef(device))
+		}
 	}
 	for _, device := range g.devicesToRemove {
-		gamepads.remove(func(gp *Gamepad) bool {
-			n, ok := gp.native.(*nativeGamepadHID)
-			return ok && n.device == device
-		})
+		if _, ok := g.deferredDevices[device]; ok {
+			delete(g.deferredDevices, device)
+			_CFRelease(_CFTypeRef(device))
+		}
+		for {
+			gp := gamepads.find(func(gp *Gamepad) bool {
+				n, ok := gp.native.(*nativeGamepadHID)
+				return ok && n.device == device
+			})
+			if gp == nil {
+				break
+			}
+			gp.close()
+			gamepads.remove(func(gamepad *Gamepad) bool {
+				return gamepad == gp
+			})
+		}
+		_CFRelease(_CFTypeRef(device))
+	}
+	// The GC backend updates first. Its rejection records persist until GC disconnection,
+	// so either callback can arrive first, with any number of updates between them.
+	for device, id := range g.deferredDevices {
+		// A false isKnownRejectedHIDDevice result means no rejected controller has been matched yet:
+		// GC may accept the device, its callback or lookup may be pending, or lookup may be unavailable.
+		// Keep the device deferred for another check next tick or until disconnection.
+		if id == 0 || !theGCGamepads.isKnownRejectedHIDDevice(id) {
+			continue
+		}
+		delete(g.deferredDevices, device)
+		if !g.addDevice(device, gamepads) {
+			_CFRelease(_CFTypeRef(device))
+		}
 	}
 	g.devicesToAdd = g.devicesToAdd[:0]
 	g.devicesToRemove = g.devicesToRemove[:0]
@@ -169,25 +229,21 @@ func hidDeviceProperty(device _IOHIDDeviceRef, key []byte) _CFTypeRef {
 	return _IOHIDDeviceGetProperty(device, keyRef)
 }
 
-func (g *nativeGamepadsIOKit) addDevice(device _IOHIDDeviceRef, gamepads *gamepads) {
-	// Let the GameController backend own the controllers it supports; IOKit handles
-	// only the devices GameController does not enumerate.
-	if gcSupportsHIDDevice(device) {
-		return
-	}
-
+// addDevice registers a gamepad for device and reports whether it did. The registered gamepad takes
+// over the caller's reference to device.
+func (g *nativeGamepadsIOKit) addDevice(device _IOHIDDeviceRef, gamepads *gamepads) bool {
 	if gamepads.find(func(gp *Gamepad) bool {
 		n, ok := gp.native.(*nativeGamepadHID)
 		return ok && n.device == device
 	}) != nil {
-		return
+		return false
 	}
 
 	elements := _IOHIDDeviceCopyMatchingElements(device, 0, kIOHIDOptionsTypeNone)
 	// It is reportedly possible for this to fail on macOS 13 Ventura
 	// if the application does not have input monitoring permissions
 	if elements == 0 {
-		return
+		return false
 	}
 	defer _CFRelease(_CFTypeRef(elements))
 
@@ -307,6 +363,7 @@ func (g *nativeGamepadsIOKit) addDevice(device _IOHIDDeviceRef, gamepads *gamepa
 	slices.SortStableFunc(n.axes, compareElements)
 	slices.SortStableFunc(n.buttons, compareElements)
 	slices.SortStableFunc(n.hats, compareElements)
+	return true
 }
 
 func compareElements(a, b element) int {
@@ -333,6 +390,15 @@ type nativeGamepadHID struct {
 	axisValues   []float64
 	buttonValues []bool
 	hatValues    []int
+}
+
+// close releases g's native resources. close can be called multiple times.
+func (g *nativeGamepadHID) close() {
+	if g.device == 0 {
+		return
+	}
+	_CFRelease(_CFTypeRef(g.device))
+	g.device = 0
 }
 
 func (g *nativeGamepadHID) elementValue(e *element) int {
