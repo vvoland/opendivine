@@ -50,6 +50,11 @@
   ],
   "packageRules": [
     {
+      "description": "Schedule GitHub Actions updates monthly",
+      "matchManagers": ["github-actions"],
+      "extends": ["schedule:monthly"]
+    },
+    {
       "description": "Group safe routine Go dependency updates",
       "matchManagers": ["gomod"],
       "matchUpdateTypes": ["minor", "patch", "pin", "digest"],
