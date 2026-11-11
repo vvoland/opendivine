@@ -23,7 +23,7 @@ struct MusicDat {
 
     // Section 3: per-region music/ambient bindings
     u32 region_count;                                      // = 153
-    u8  region_body[];                                     // schema TBD — 12,066 bytes in shipped file
+    Region regions[region_count];                         // five-list schema below
 };
 
 struct Track {                       // section 1 form
@@ -38,13 +38,13 @@ struct Track {                       // section 1 form
 Section 2's `Track` records have the **same shape minus the trailing
 `u32`** — just `label_len + label + filename_len + filename`.
 
-`pkg/assets/musicdat` validates sections 1 + 2 byte-exact:
+The three sections contain:
 
 | section          | count | examples                                     |
 |------------------|------:|---------------------------------------------|
 | tracks           |    43 | "1"/"1.ogg", "12"/"12.ogg", "17cAmMix2"/...  |
 | ambients         |    22 | "BehindDaBridge", "Cellar", "Forest", ...   |
-| regions (header) |   153 | first label = "Aleroth" (7 chars)            |
+| regions          |   153 | first label = "Aleroth" (7 chars)            |
 
 ### Section 3 — per-region bindings ✅
 
@@ -92,14 +92,8 @@ Empirically:
   (`FUN_00552da0`). Day/night pick: night = hour < 5 or ≥ 23
   (`0x553791/0x5537a1`); an empty night list falls back to day.
 
-Validated by an ad-hoc parse of the shipped file — all 153 regions
-parse byte-exact through to EOF (14133 bytes), with `Aleroth`'s
-`L0 = [(4, 0.2), (forest, 0.2)]`, `L3 = [(GenDay01, 1.0)]`,
-`L4 = [(GenNight, 1.0)]` matching the documented values. *(Note: the
-Go decoder [`pkg/assets/musicdat`](../../pkg/assets/musicdat)
-currently stops after section 2 and does **not** yet implement this
-section — an earlier revision of this paragraph wrongly credited it
-with the validation.)*
+Validated by an ad-hoc parse of the shipped file — all 153 regions parse byte-exact through to EOF (14133 bytes), with `Aleroth`'s `L0 = [(4, 0.2), (forest, 0.2)]`, `L3 = [(GenDay01, 1.0)]`, `L4 = [(GenNight, 1.0)]` matching the documented values.
+This validation predates the Go decoder's section-3 support.
 
 ## `sound\nsound.dat` — sound effect bank
 
