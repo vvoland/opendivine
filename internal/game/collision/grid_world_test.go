@@ -74,7 +74,8 @@ func TestShippedWorldWalkable(t *testing.T) {
 	// 0x009) were passable under the old `cr.Type != 0` placement gate;
 	// the engine ignores cube type and gates on the flags-word mask
 	// (fcn.00572100 @ 0x5721ec).
-	typeZeroWalls := 0
+	stamped, typeZeroWalls := 0, 0
+
 	var wallX, wallY int
 	err = world.Walk(mustRead("main/startup/world.x0"), func(cx, cy int, c world.Cell) {
 		for _, o := range c.Objects {
