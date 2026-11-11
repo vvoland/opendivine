@@ -25,7 +25,7 @@ Divine Divinity is a great game and it deserves to be playable forever.
 
 ## Running it
 
-Requires Go 1.24 and a copy of Divine Divinity installed on disk.
+Requires Go and a copy of Divine Divinity installed on disk.
 
 You can either install from source with Go or download a prebuilt binary from the project's [GitHub Releases](https://github.com/vvoland/opendivine/releases).
 
@@ -43,10 +43,11 @@ On failure it prints every path it tried.
 
 Useful flags: `-class {surm,surf,warm,warf,wizm,wizf}`, `-posx`, `-posy`, `-zoom`, `-region`.
 
-## Development shell
+### Development shell
 
 On Linux with Docker, Make, and Go installed, run `make shell` for a development shell with persistent Go caches and available graphics, audio, and game data forwarded.
-Use `go run ./cmd/gamedata-probe` to print the detected host game-data path.
+
+You can then run the game simply by executing `go run .` in it.
 
 ## Showcase
 
