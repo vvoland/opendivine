@@ -47,6 +47,27 @@ type Clock struct {
 	// lastNow is the time given to the last UpdateFrame call.
 	lastNow int64
 
+	// frameUpdated reports whether UpdateFrame has been called.
+	frameUpdated bool
+
+	// smoothedFrameInterval is the real time between recent frames.
+	smoothedFrameInterval int64
+
+	// frameIntervals is the number of frame intervals that smoothedFrameInterval is based on, up to 8.
+	frameIntervals int64
+
+	// smoothedFrameIntervalDeviation is the smoothed deviation of frame intervals from smoothedFrameInterval.
+	smoothedFrameIntervalDeviation int64
+
+	// skippableFrameIntervals is the number of irregular frame intervals that can still be skipped in a row.
+	skippableFrameIntervals int64
+
+	// frameIntervalSkipped reports whether a frame interval has been skipped since rounding last ran a tick.
+	frameIntervalSkipped bool
+
+	// framesSinceTick is the number of frames since the last frame that ran a tick.
+	framesSinceTick int64
+
 	actualFPS   float64
 	actualTPS   float64
 	lastUpdated int64
@@ -97,6 +118,7 @@ func (c *Clock) TPS() int {
 //
 // If TPS is SyncWithFPS, UpdateFrame always returns 1.
 // If TPS is 0, UpdateFrame always returns 0.
+// The real time before the first call doesn't count toward ticks.
 //
 // UpdateFrame is expected to be called once per frame with a monotonic now.
 func (c *Clock) UpdateFrame(now int64) int {
@@ -109,6 +131,13 @@ func (c *Clock) UpdateFrame(now int64) int {
 	}
 	delta := now - c.lastNow
 	c.lastNow = now
+	// The first delta is the time since NewClock, which is neither a frame interval nor the game's time.
+	if c.frameUpdated {
+		c.updateSmoothedFrameInterval(delta)
+	} else {
+		delta = 0
+	}
+	c.frameUpdated = true
 
 	var count int
 	switch tps := c.tps.Load(); {
@@ -121,9 +150,49 @@ func (c *Clock) UpdateFrame(now int64) int {
 		c.unconsumedTime = 0
 	}
 
+	if count > 0 {
+		c.framesSinceTick = 0
+	} else {
+		c.framesSinceTick++
+	}
+
 	c.updateActualFPSAndTPS(now, count)
 
 	return count
+}
+
+// updateSmoothedFrameInterval updates the smoothed frame interval with the real time between the last
+// two frames.
+func (c *Clock) updateSmoothedFrameInterval(interval int64) {
+	s := c.smoothedFrameInterval
+	deviation := abs(interval - s)
+
+	if c.frameIntervals < 8 {
+		// The first frame intervals can be irregular, such as while the display queue fills up. Until the
+		// average is based on enough of them, start it over at an interval far from it.
+		if interval > 2*s || 2*interval < s {
+			c.frameIntervals = 0
+		}
+	} else {
+		// After that, skip up to 8 irregular frame intervals in a row, such as a long frame and the short
+		// frames catching up after it, so that they don't move the average across the ratios judged in
+		// consumeTicks. An irregular one is off by more than both a quarter of the average and 6 times the
+		// deviation, which a jitter hardly is, or is shorter than half the average right after another.
+		irregular := deviation > max(s/4, 6*c.smoothedFrameIntervalDeviation) ||
+			(c.skippableFrameIntervals < 8 && 2*interval < s)
+		if !irregular {
+			c.skippableFrameIntervals = 8
+		} else if c.skippableFrameIntervals > 0 {
+			c.skippableFrameIntervals--
+			c.frameIntervalSkipped = true
+			return
+		}
+	}
+
+	// Average the intervals so far, and then take an exponential moving average.
+	c.frameIntervals = min(c.frameIntervals+1, 8)
+	c.smoothedFrameInterval += (interval - s) / c.frameIntervals
+	c.smoothedFrameIntervalDeviation += (deviation - c.smoothedFrameIntervalDeviation) / c.frameIntervals
 }
 
 // consumeTicks returns how many ticks the elapsed real time affords, and subtracts them from the
@@ -134,25 +203,60 @@ func (c *Clock) consumeTicks(tps int64, delta int64) int {
 
 	c.unconsumedTime += delta
 
-	// Limit the time that one frame can catch up with. Otherwise, a slow frame would run so many ticks
-	// that the next frame gets even slower, and the frame rate would never recover. With this limit,
-	// the game time gets behind the real time instead: the game runs in slow motion, which is
-	// recoverable, rather than spiraling down.
-	c.unconsumedTime = min(c.unconsumedTime, max(maxCatchUpTicks*tick, int64(minCatchUpTime)))
+	// Limit the time that one frame can catch up with, so that a slow frame doesn't run so many ticks that
+	// the frame rate never recovers. The game runs in slow motion instead.
+	limit := max(maxCatchUpTicks*tick, int64(minCatchUpTime))
+	c.unconsumedTime = min(c.unconsumedTime, limit)
 
-	// Round the count to the nearest tick rather than truncating it. With truncation, a small jitter in
-	// the frame timing crosses a tick boundary back and forth, and the count becomes unstable like
-	// 0, 2, 0, 2, ... whenever the frame interval is close to a multiple of a tick.
-	//
-	// The rounded-up part is kept as a negative unconsumed time, so that rounding never accumulates
-	// into a drift from the real time.
+	// When frames come at a multiple of a tick, a jitter around a rounding boundary flips the count like
+	// 0, 2, 0, 2. To avoid this, run the multiple of ticks while the game time stays within a tick of the
+	// real time, and otherwise let the rounding below bring it back to the middle. The ratio is judged by
+	// the smoothed frame interval once it is based on a few frame intervals, with a tight tolerance so that
+	// a jitter doesn't switch between this and the rounding.
+	judgeable := c.frameIntervals >= 3
+	n := (delta + tick/2) / tick
+	if judgeable && n > 0 && n*tick <= limit && abs(c.smoothedFrameInterval-n*tick) < tick/16 && abs(c.unconsumedTime-n*tick) < tick {
+		c.unconsumedTime -= n * tick
+		return int(n)
+	}
+
+	// Likewise, when frames come k times per tick, a jitter moves the tick between adjacent frames like
+	// 1, 0, 0, 1, 1, 0. Run a tick every k-th frame while the game time stays within half a tick and half a
+	// frame of the real time. k is up to 4, as the error of the smoothed frame interval is multiplied by k.
+	// A skipped frame interval, such as a dropped frame, can shift the phase, so this waits until the
+	// rounding runs a tick.
+	if s := c.smoothedFrameInterval; judgeable && !c.frameIntervalSkipped && s > 0 {
+		k := (tick + s/2) / s
+		if k >= 2 && k <= 4 && abs(k*s-tick) < tick/16 {
+			var count int64
+			if c.framesSinceTick >= k-1 {
+				count = 1
+			}
+			if abs(c.unconsumedTime-count*tick) < tick/2+tick/(2*k) {
+				c.unconsumedTime -= count * tick
+				return int(count)
+			}
+		}
+	}
+
+	// Round to the nearest tick. The rounded-up part is kept as a negative unconsumed time to avoid a drift.
 	t := c.unconsumedTime + tick/2
 	if t <= 0 {
 		return 0
 	}
 	count := t / tick
 	c.unconsumedTime -= count * tick
+	if count > 0 {
+		c.frameIntervalSkipped = false
+	}
 	return int(count)
+}
+
+func abs(x int64) int64 {
+	if x < 0 {
+		return -x
+	}
+	return x
 }
 
 func (c *Clock) updateActualFPSAndTPS(now int64, count int) {
@@ -168,15 +272,10 @@ func (c *Clock) updateActualFPSAndTPS(now int64, count int) {
 	c.tpsCount = 0
 }
 
-// SinkTick advances the game time by one tick, so that the following UpdateFrame calls
-// return correspondingly fewer ticks. It accounts for a tick that was run outside of UpdateFrame's
-// own counting (such as a tick forced on window resize), keeping the total number of ticks
-// consistent with the target TPS over time.
-//
-// now is the current time, in the same time base as UpdateFrame's argument.
-//
-// The game time is never advanced past the current real time, so that a long continuous resize does
-// not bank an unbounded number of future ticks and stall the game after the resize ends.
+// SinkTick advances the game time by one tick run outside of UpdateFrame, such as one forced on window
+// resize, so that the following UpdateFrame calls return correspondingly fewer ticks. The game time is
+// never advanced past the real time. now is the current time, in the same time base as UpdateFrame's
+// argument.
 //
 // SinkTick has no effect unless a positive TPS is set.
 func (c *Clock) SinkTick(now int64) {
@@ -188,10 +287,10 @@ func (c *Clock) SinkTick(now int64) {
 		return
 	}
 
-	// Consume the real time that has passed since the last frame, so that the sunk tick counts even
-	// when UpdateFrame is not called in between.
+	// Consume the real time since the last frame too, as UpdateFrame might not be called in between.
 	c.unconsumedTime = max(c.unconsumedTime+(now-c.lastNow)-int64(time.Second)/tps, 0)
 	c.lastNow = now
+	c.framesSinceTick = 0
 }
 
 var theClock = NewClock(now())
