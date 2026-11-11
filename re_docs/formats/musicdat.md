@@ -49,49 +49,34 @@ section 1 carries.
 Parsing section 2 reaches offset 2063; the **third section** is the
 zone map below.
 
-## Section 3 — zone → weighted day/night tracks ✅ (model)
+## Section 3 — zone → music and ambient bindings ✅
 
 ```text
 u32  count                    (= 153 zones)
 Zone[count]:
     u32   name_len
-    char  name[name_len]      // "Aleroth", "Aleroth_Cellar", …
-    …     day track list      // weighted tracks for daytime
-    …     night track list    // weighted tracks for night
-    where each track entry ≈ { u32 name_len, char name[], f32 weight }
+    char  name[name_len]      // "Aleroth", "Aleroth_Cellar", …; no NUL
+    List  lists[5]
+    u32   flag               // observed 0/1; meaning not established
+List:
+    u32   count
+    Assignment[count]:
+        u32   label_len
+        char  label[label_len]
+        f32   volume         // playback gain, NOT a selection weight
 ```
 
-153 zones, each binding a list of **day** tracks and a list of **night**
-tracks with **float weights** for random selection. Example, `Aleroth`:
+Zone names are identifier forms of the **`MusicV1.0` region table** (`region.001`, [`region.md`](region.md)) names, not necessarily exact display-name matches.
+Replace each character outside ASCII letters, digits and `_` with one underscore, preserving case and repeated underscores: `Aleroth Woods (Dark)` → `Aleroth_Woods__Dark_`, `Light Woods` → `Light_Woods`.
+This joins 152 of the 155 shipped music polygons to zone bindings; `map3_extra1`, `map3_extra2` and `map3_extra3` have no binding.
+L0 holds primary music; L1 is reserved and unused; L2 holds timed overrides, untriggered in the shipped engine.
+L3 and L4 hold day and night ambients respectively, not alternate music playlists.
+Music lists resolve against section 1; ambient lists resolve against section 2.
+An empty night ambient list falls back to the day list.
+See [sound.md](sound.md) for the reader functions and runtime evidence.
 
-```text
-day:   "4" (0.2), "forest" (0.2)
-night: "GenDay01" (1.0), "GenNight" (1.0)
-```
-
-The track names reference sections 1–2; the zone names are what the
-**`MusicV1.0` region table** (`region.001`, [`region.md`](region.md))
-matches against. So the music subsystem picks a zone from the player's
-region, then a weighted track from the **day or night** list per the
-world clock ([`world-clock.md`](../world-clock.md)) — i.e. zones can play
-different music by time of day.
-
-**Track entry — verified byte-exact:** `{ u32 name_len, char name[],
-f32 weight }`. `Aleroth`'s day list is `count=2` → `"4"` (0.2),
-`"forest"` (0.2), and its night `count=0`. The two `u32` count fields
-delimit the day and night lists.
-
-**Section-3 "flag bytes" — resolved in [sound.md](sound.md) ✅.** The
-"variable trailing `u32` run" that blocked a fixed walk here is not
-irregular at all: each zone carries **5 parallel binding lists** (not
-day+night 2), and the "trailing `0,0,1`" after `Aleroth` is simply the
-empty counts of two further lists plus the final `u32` flag. With the
-5-list schema (`{label, List[5], u32 flag}`, each list
-`{count, (label,f32 volume)×count}`) the whole section walks
-byte-exact to EOF — see sound.md's Section 3 for the schema, the
-reader functions (`FUN_00554080`), and the list roles (L0 music,
-L3 day / L4 night ambients). This paragraph's "does not walk with any
-fixed pattern" conclusion is retracted.
+For `Aleroth`, L0 is `[("4", 0.2), ("forest", 0.2)]`, L1/L2 are empty, L3 is `[("GenDay01", 1.0)]`, and L4 is `[("GenNight", 1.0)]`.
+The earlier two-list, weighted day/night-music interpretation was incorrect.
 
 ## Status
 
@@ -100,11 +85,7 @@ fixed pattern" conclusion is retracted.
 - Section 2 (location tracks) ✅ — `u32 count(22)` + `{name, .ogg}`
   records (no trailing field); 22 place-named tracks. *Corrects an
   earlier "zones" mislabel.*
-- Section 3 (zone map) ✅ (model) — `u32 count(153)` zones, each with a
-  weighted **day** track list and **night** track list (so music can
-  change by time of day); the exact per-entry separator/flag fields 🟡.
-- Region → track link ✅ (by name) — the `MusicV1.0` regions
-  (`region.001`) match zone names; the zone picks a weighted day/night
-  track per the world clock.
+- Section 3 (zone map) ✅ — `u32 count(153)` zones with five assignment lists and a trailing flag; each assignment stores a label and volume.
+- Region → track link ✅ (by identifier-normalized name) — the `MusicV1.0` regions (`region.001`) match zone identifiers; L0 supplies music and L3/L4 supply day/night ambients.
 - The `field` (`+after file`, always 0) ❓ — a track flag/type, unused
   in the shipped data.

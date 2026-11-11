@@ -370,6 +370,8 @@ func (g *Game) Draw(screen *ebiten.Image) {
 		fmt.Fprintf(msg, "  colliders[F10]")
 	}
 
+	fmt.Fprint(msg, "  regions[F11]")
+
 	// Hover info: world (X,Y), cell (CX,CY), and the topmost object instance
 	// whose rendered sprite contains the cursor.
 	mx, my := ebiten.CursorPosition()
@@ -398,6 +400,10 @@ func (g *Game) Draw(screen *ebiten.Image) {
 			}
 			fmt.Fprintf(msg, "  [interactive: %s]", state)
 		}
+	}
+
+	if g.showRegions {
+		fmt.Fprint(msg, g.drawNamedRegions(screen, worldToScreen))
 	}
 
 	ebitenutil.DebugPrint(screen, msg.String())

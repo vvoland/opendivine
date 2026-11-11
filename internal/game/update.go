@@ -39,6 +39,14 @@ func (g *Game) Update() error {
 	if inpututil.IsKeyJustPressed(ebiten.KeyF10) {
 		g.showColliders = !g.showColliders
 	}
+
+	if inpututil.IsKeyJustPressed(ebiten.KeyF11) {
+		g.showRegions = !g.showRegions
+		if g.showRegions && !g.namedRegionsLoaded {
+			g.loadNamedRegions()
+		}
+	}
+
 	if inpututil.IsKeyJustPressed(ebiten.KeyF12) {
 		g.wantShot = true
 	}
@@ -162,6 +170,9 @@ func (g *Game) Update() error {
 			g.zoom = 4.0
 		}
 	}
+
+	g.updateRegionMusic()
+
 	return nil
 }
 

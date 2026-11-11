@@ -1,9 +1,7 @@
 # Status — how playable is OpenDivine?
 
-**Short answer: not yet playable as a game.** You can walk a fully
-rendered world with an animated hero, open doors and chests, and listen
-to the menu music — but there are no monsters, no items you can pick
-up, no stats, no story, and no saving.
+**Short answer: not yet playable as a game.**
+You can walk a fully rendered world with an animated hero, open doors and chests, and listen to menu and region-based music — but there are no monsters, no items you can pick up, no stats, no story, and no saving.
 
 This page tracks the *player experience*. The full engineering plan
 with every implementation step is in [ROADMAP.md](ROADMAP.md); the
@@ -61,7 +59,8 @@ reverse-engineering knowledge base behind it is complete
 ## Sound & video
 
 - [x] Main-menu music
-- [ ] In-world music and ambient sound (zone/day/night)
+- [x] Region-based in-world music with smooth fades and shared-track continuity
+- [ ] Day/night ambient sound
 - [ ] Sound effects
 - [ ] Intro/outro movies
 

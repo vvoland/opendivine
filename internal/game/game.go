@@ -5,6 +5,7 @@ package game
 import (
 	"github.com/hajimehoshi/ebiten/v2"
 
+	"grono.dev/opendivine/internal/game/audio"
 	"grono.dev/opendivine/internal/game/character"
 	"grono.dev/opendivine/internal/game/collision"
 	"grono.dev/opendivine/internal/game/mover"
@@ -12,6 +13,7 @@ import (
 	"grono.dev/opendivine/pkg/assets/collide"
 	"grono.dev/opendivine/pkg/assets/cpacked"
 	"grono.dev/opendivine/pkg/assets/objects"
+	"grono.dev/opendivine/pkg/assets/region"
 )
 
 type Game struct {
@@ -52,8 +54,13 @@ type Game struct {
 	showFloors    bool   // F7 toggle
 	showObjects   bool   // F8 toggle
 	showColliders bool   // F10 toggle: walkability-grid overlay
+	showRegions   bool   // F11 toggle: named-region polygons
 	wantShot      bool   // F12: capture next frame to screenshot
 	shotPath      string // -screenshot flag: write to this path then exit
+
+	namedRegions       [8]*region.File
+	namedRegionsLoaded bool
+	music              *audio.RegionMusic
 }
 
 func (g *Game) Layout(outsideWidth, outsideHeight int) (int, int) {

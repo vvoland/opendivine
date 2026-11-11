@@ -2,7 +2,13 @@
 
 package game
 
-import "github.com/hajimehoshi/ebiten/v2"
+import (
+	"time"
+
+	"github.com/hajimehoshi/ebiten/v2"
+
+	"grono.dev/opendivine/internal/game/audio"
+)
 
 // Screen is the unit of high-level state in OpenDivine: main menu,
 // in-world simulation, future load/save UI, etc. The shell forwards
@@ -43,6 +49,7 @@ func (s gameScreen) Layout(w, h int) (int, int) { return s.g.Layout(w, h) }
 // ScreenQuit sentinel.
 type shell struct {
 	current Screen
+	music   *audio.MusicManager
 }
 
 func (s *shell) Update() error {
@@ -56,6 +63,11 @@ func (s *shell) Update() error {
 	if next != nil {
 		s.current = next
 	}
+
+	if s.music != nil {
+		s.music.Update(time.Second / engineTPS)
+	}
+
 	return nil
 }
 

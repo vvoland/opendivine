@@ -1,9 +1,7 @@
 # `static\osinames.000` & `static\osiobjects.000` — Osiris static snapshots
 
-Two small fixed-record tables under `main\startup\static\` that pair the
-compiled Osiris story ([`../osiris.md`](../osiris.md)) with the live
-world's named objects. **Both parse byte-exact** (no baked-pointer
-heap-dump caveat, unlike `books.000`/`region.000`).
+Two small fixed-record tables under `main\startup\static\` that pair the compiled Osiris story ([`../osiris.md`](../osiris.md)) with the live world's named objects.
+**Both parse byte-exact** (no baked-pointer heap-dump caveat, unlike `books.000`).
 
 ## `osiobjects.000` — object handle → index (byte-exact)
 
