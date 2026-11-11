@@ -32,7 +32,7 @@ RUN --mount=type=cache,id=go-build,target=/root/.cache/go-build \
 
 FROM golang-base AS build-modernize
 # modernize lives inside gopls; the version arg is a gopls release tag.
-ARG MODERNIZE_VERSION=v0.23.0
+ARG MODERNIZE_VERSION=v0.24.0
 ENV CGO_ENABLED=0 GOFLAGS=-trimpath
 RUN --mount=type=cache,id=go-build,target=/root/.cache/go-build \
     --mount=type=cache,id=go-mod,target=/go/pkg/mod \
