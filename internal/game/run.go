@@ -92,7 +92,7 @@ func Run(cfg Config) error {
 
 		g.startRegionMusic(music)
 
-		return ebiten.RunGame(&shell{current: gameScreen{g: g}})
+		return ebiten.RunGame(&shell{current: gameScreen{g: g}, music: music})
 	}
 
 	menu := mainmenu.New(false /* no live game yet */)
@@ -119,7 +119,8 @@ func Run(cfg Config) error {
 		}
 	}
 
-	sh := &shell{current: &menuScreen{menu: menu, music: music, cfg: cfg}}
+	sh := &shell{current: &menuScreen{menu: menu, music: music, cfg: cfg}, music: music}
+
 	return ebiten.RunGame(sh)
 }
 
@@ -131,22 +132,14 @@ type menuScreen struct {
 	cfg   Config
 }
 
-func (s *menuScreen) stopMusic() {
-	if s.music != nil {
-		s.music.Stop()
-	}
-}
-
 func (s *menuScreen) Update() (Screen, error) {
 	if err := s.menu.Update(); err != nil {
 		return nil, err
 	}
 	switch s.menu.TakeAction() {
 	case mainmenu.ActionQuit:
-		s.stopMusic()
 		return ScreenQuit, nil
 	case mainmenu.ActionNewGame:
-		s.stopMusic()
 		g, err := New(s.cfg)
 		if err != nil {
 			log.Printf("new game: %v", err)

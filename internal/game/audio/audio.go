@@ -16,7 +16,9 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
+	"time"
 
 	"github.com/hajimehoshi/ebiten/v2/audio"
 	"github.com/hajimehoshi/ebiten/v2/audio/vorbis"
@@ -28,6 +30,47 @@ import (
 // SampleRate is the ebiten audio-context mix rate; matches the OGG
 // streams shipped in dat\sound.cmp (44100 Hz).
 const SampleRate = 44100
+
+const musicFadeDuration = 2 * time.Second
+
+type musicStream interface {
+	Play()
+	SetVolume(float64)
+	PauseAndStopReading()
+}
+
+type musicVoice struct {
+	label  string
+	loop   bool
+	player musicStream
+
+	volume  float64
+	start   float64
+	target  float64
+	elapsed time.Duration
+}
+
+func (v *musicVoice) fadeTo(volume float64) {
+	if v.target == volume {
+		return
+	}
+
+	v.start, v.target, v.elapsed = v.volume, volume, 0
+}
+
+func (v *musicVoice) advance(dt time.Duration) {
+	v.elapsed = min(v.elapsed+dt, musicFadeDuration)
+	t := float64(v.elapsed) / float64(musicFadeDuration)
+	// Smoothstep avoids abrupt changes in slope at either end of the fade.
+	gain := t * t * (3 - 2*t)
+
+	v.volume = v.start + (v.target-v.start)*gain
+	if v.elapsed == musicFadeDuration {
+		v.volume = v.target
+	}
+
+	v.player.SetVolume(v.volume)
+}
 
 var (
 	ctxOnce sync.Once
@@ -42,7 +85,7 @@ func Context() *audio.Context {
 }
 
 // MusicManager owns the music.dat index, the sound.cmp archive
-// handle, and the currently-playing music stream. Build one with
+// handle, and the active and fading music streams. Build one with
 // NewMusicManager and call Close when done to release the sound.cmp
 // file handle.
 type MusicManager struct {
@@ -54,8 +97,9 @@ type MusicManager struct {
 	arcFile *os.File
 	arc     *soundcmp.Archive
 
-	mu  sync.Mutex
-	cur *audio.Player
+	mu     sync.Mutex
+	cur    *musicVoice
+	voices []*musicVoice
 }
 
 // NewMusicManager parses sound\music.dat and mounts dat\sound.cmp
@@ -109,14 +153,24 @@ func newMusicManager(gamedataDir string) (*MusicManager, error) {
 // music.dat.
 var ErrUnknownTrack = errors.New("audio: unknown music track")
 
-// PlayMusic stops any currently playing music and starts the named
-// track at volume in [0, 1].
+// PlayMusic crossfades to the named track at volume in [0, 1].
+// A still-fading stream with the same label and loop mode is reused.
 // If loop is true the stream restarts on completion.
 // Label must be one of the music.dat labels (tracks and ambients share a
 // flat namespace).
 func (m *MusicManager) PlayMusic(label string, loop bool, volume float64) error {
 	if math.IsNaN(volume) || volume < 0 || volume > 1 {
 		return fmt.Errorf("audio: invalid music volume %v", volume)
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for _, voice := range m.voices {
+		if voice.label == label && voice.loop == loop {
+			m.selectVoice(voice, volume)
+			return nil
+		}
 	}
 
 	t, ok := m.byLabel[label]
@@ -141,20 +195,48 @@ func (m *MusicManager) PlayMusic(label string, loop bool, volume float64) error 
 		return fmt.Errorf("audio player: %w", err)
 	}
 
-	pl.SetVolume(volume)
-
-	m.mu.Lock()
-	old := m.cur
-	m.cur = pl
-	m.mu.Unlock()
-	if old != nil {
-		old.PauseAndStopReading()
-	}
+	pl.SetVolume(0)
+	voice := &musicVoice{label: label, loop: loop, player: pl}
+	m.voices = append(m.voices, voice)
+	m.selectVoice(voice, volume)
 	pl.Play()
 	return nil
 }
 
-// SetVolume changes the current music's volume without restarting its stream.
+func (m *MusicManager) selectVoice(voice *musicVoice, volume float64) {
+	for _, other := range m.voices {
+		if other != voice {
+			other.fadeTo(0)
+		}
+	}
+
+	m.cur = voice
+	voice.fadeTo(volume)
+}
+
+// Update advances music fades by simulation time.
+// Call it once per tick, including while the active zone stays unchanged.
+func (m *MusicManager) Update(dt time.Duration) {
+	if dt <= 0 {
+		return
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.voices = slices.DeleteFunc(m.voices, func(voice *musicVoice) bool {
+		voice.advance(dt)
+
+		if voice != m.cur && voice.target == 0 && voice.volume == 0 {
+			voice.player.PauseAndStopReading()
+			return true
+		}
+
+		return false
+	})
+}
+
+// SetVolume fades the current music to a new volume without restarting it.
 // Volume must be in [0, 1].
 // With no current stream, it does nothing.
 func (m *MusicManager) SetVolume(volume float64) error {
@@ -166,21 +248,34 @@ func (m *MusicManager) SetVolume(volume float64) error {
 	defer m.mu.Unlock()
 
 	if m.cur != nil {
-		m.cur.SetVolume(volume)
+		m.cur.fadeTo(volume)
 	}
 
 	return nil
 }
 
-// Stop halts the currently playing music. Safe to call when nothing
-// is playing.
+// FadeOut fades all music to silence, then stops reading its streams.
+func (m *MusicManager) FadeOut() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.cur = nil
+	for _, voice := range m.voices {
+		voice.fadeTo(0)
+	}
+}
+
+// Stop immediately halts all current and fading music streams.
+// It is safe to call when nothing is playing.
 func (m *MusicManager) Stop() {
 	m.mu.Lock()
-	cur := m.cur
+	voices := m.voices
 	m.cur = nil
+	m.voices = nil
 	m.mu.Unlock()
-	if cur != nil {
-		cur.PauseAndStopReading()
+
+	for _, voice := range voices {
+		voice.player.PauseAndStopReading()
 	}
 }
 

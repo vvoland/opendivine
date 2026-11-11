@@ -59,7 +59,7 @@ reverse-engineering knowledge base behind it is complete
 ## Sound & video
 
 - [x] Main-menu music
-- [x] Region-based in-world music (one looping track per zone visit; no fades yet)
+- [x] Region-based in-world music with smooth fades and shared-track continuity
 - [ ] Day/night ambient sound
 - [ ] Sound effects
 - [ ] Intro/outro movies

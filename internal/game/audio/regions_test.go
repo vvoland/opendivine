@@ -21,10 +21,10 @@ type musicPlayback struct {
 }
 
 type recordingMusicPlayer struct {
-	plays   []musicPlayback
-	volumes []float64
-	stops   int
-	err     error
+	plays    []musicPlayback
+	volumes  []float64
+	fadeOuts int
+	err      error
 }
 
 func (p *recordingMusicPlayer) PlayMusic(label string, loop bool, volume float64) error {
@@ -32,7 +32,7 @@ func (p *recordingMusicPlayer) PlayMusic(label string, loop bool, volume float64
 	return p.err
 }
 
-func (p *recordingMusicPlayer) Stop() { p.stops++ }
+func (p *recordingMusicPlayer) FadeOut() { p.fadeOuts++ }
 
 func (p *recordingMusicPlayer) SetVolume(volume float64) error {
 	p.volumes = append(p.volumes, volume)
@@ -80,7 +80,7 @@ func TestRegionMusicTransitions(t *testing.T) {
 	}))
 	assert.NilError(t, r.Update(0, 6, 6))
 	assert.Equal(t, len(player.plays), 1)
-	assert.Equal(t, player.stops, 1)
+	assert.Equal(t, player.fadeOuts, 0)
 
 	assert.NilError(t, r.Update(1, 5, 5))
 	assert.Equal(t, player.plays[1], musicPlayback{"world1", true, 0.5})
@@ -93,9 +93,9 @@ func TestRegionMusicTransitions(t *testing.T) {
 	assert.Equal(t, len(player.plays), 3, "an unknown binding must stop playback")
 	assert.NilError(t, r.Update(0, 100, 100))
 	assert.Equal(t, len(player.plays), 3)
-	assert.Equal(t, player.stops, 6)
+	assert.Equal(t, player.fadeOuts, 3)
 	assert.NilError(t, r.Update(0, 101, 101))
-	assert.Equal(t, player.stops, 6)
+	assert.Equal(t, player.fadeOuts, 3)
 
 	assert.NilError(t, r.Update(0, 5, 5))
 	assert.Equal(t, len(player.plays), 4, "re-entry must start music again")
@@ -132,13 +132,13 @@ func TestRegionMusicContinuesSharedTrack(t *testing.T) {
 	assert.NilError(t, r.Update(1, 5, 5))
 	assert.NilError(t, r.Update(0, 5, 5))
 	assert.Equal(t, len(player.plays), 1, "crossing a zone must not reopen a shared track")
-	assert.Equal(t, player.stops, 1)
+	assert.Equal(t, player.fadeOuts, 0)
 	assert.Assert(t, is.DeepEqual(player.volumes, []float64{
 		float64(float32(0.6)), float64(float32(0.6)), float64(float32(0.3)),
 	}))
 
 	assert.NilError(t, r.Update(0, 100, 100))
-	assert.Equal(t, player.stops, 2)
+	assert.Equal(t, player.fadeOuts, 1)
 	assert.NilError(t, r.Update(0, 5, 5))
 	assert.Equal(t, len(player.plays), 2, "returning from silence must restart playback")
 }
@@ -162,7 +162,7 @@ func TestRegionMusicRetriesAfterTransition(t *testing.T) {
 	assert.ErrorContains(t, r.Update(0, 1, 1), "missing clip")
 	assert.NilError(t, r.Update(0, 2, 2))
 	assert.Equal(t, len(player.plays), 1)
-	assert.Equal(t, player.stops, 1)
+	assert.Equal(t, player.fadeOuts, 1)
 
 	player.err = nil
 

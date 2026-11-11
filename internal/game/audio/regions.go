@@ -16,12 +16,12 @@ import (
 type musicPlayer interface {
 	PlayMusic(label string, loop bool, volume float64) error
 	SetVolume(volume float64) error
-	Stop()
+	FadeOut()
 }
 
 // RegionMusic selects primary music from the first polygon containing the
 // player in the active world.
-// It does not implement fades, timed overrides or day/night ambients.
+// It does not implement timed overrides or day/night ambients.
 type RegionMusic struct {
 	player  musicPlayer
 	regions *region.File
@@ -55,7 +55,7 @@ func NewRegionMusic(m *MusicManager, regions *region.File) (*RegionMusic, error)
 // Otherwise, select one L0 entry uniformly and loop it.
 // Each entry's float is playback volume, not a selection weight.
 // This is a port policy, not the engine's full playlist/silence state machine.
-// An unbound zone or empty music list stops playback.
+// An unbound zone or empty music list fades playback to silence.
 // Failed playback is retried only after another transition, not every tick.
 func (r *RegionMusic) Update(worldID uint32, x, y float64) error {
 	name := ""
@@ -78,7 +78,7 @@ func (r *RegionMusic) Update(worldID uint32, x, y float64) error {
 
 	entries, found := r.zones[label]
 	if !found {
-		r.player.Stop()
+		r.player.FadeOut()
 		r.track = ""
 
 		log.Printf("music region %q: no music.dat binding %q", name, label)
@@ -86,7 +86,7 @@ func (r *RegionMusic) Update(worldID uint32, x, y float64) error {
 	}
 
 	if len(entries) == 0 {
-		r.player.Stop()
+		r.player.FadeOut()
 		r.track = ""
 
 		log.Printf("music zone %q: empty primary music list", name)
@@ -105,11 +105,11 @@ func (r *RegionMusic) Update(worldID uint32, x, y float64) error {
 		}
 	}
 
-	r.player.Stop()
 	r.track = ""
 
 	entry := entries[rand.IntN(len(entries))]
 	if err := r.player.PlayMusic(entry.Label, true, float64(entry.Volume)); err != nil {
+		r.player.FadeOut()
 		return fmt.Errorf("music zone %q track %q: %w", name, entry.Label, err)
 	}
 

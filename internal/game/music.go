@@ -13,7 +13,7 @@ func (g *Game) startRegionMusic(music *audio.MusicManager) {
 		return
 	}
 
-	music.Stop()
+	music.FadeOut()
 
 	if err := g.loadNamedRegion(1); err != nil {
 		log.Printf("world music: %v (continuing silently)", err)
