@@ -34,7 +34,7 @@ The file *number* does not equal the type enum (e.g. `region.002` is the **monst
 
 The record and vertex layouts below come from [Raan's region-format findings](https://github.com/vvoland/opendivine/issues/10#issuecomment-6711735678), including a C# `BinaryReader` parsing example and a rendered-region screenshot.
 They supersede the earlier interpretation of the geometry as cell-relative 32-bit floats interleaved with baked pointers.
-The reported layout has not yet been independently walked against all eight shipped files here.
+The reported layout now walks all eight shipped files to EOF with their declared record counts.
 
 All integers and floating-point values are little-endian.
 String lengths are byte counts; the existing file inspection identifies trailing NULs in the subsystem tag and region names.
@@ -128,6 +128,6 @@ These runtime containers do not imply that the disk format is a heap dump or req
 - Subsystem indexing ✅ — per-subsystem region tables, not world partitions; verified across all eight files and confirmed by the loader's nine-value region-type enum.
 - Role ✅ — named trigger areas referenced by traps, monsters, audio, Osiris and quests, each in its matching subsystem file.
 - Runtime containment ✅ — double-precision winding-number test over a region's polygon.
-- Record framing and geometry 🟡 — Raan reports four leading `u32` fields (including world ID), a length-prefixed name, one-byte flag, vertex count and fixed 24-byte vertices with absolute `f64` pixel coordinates; independent full-file validation remains open.
+- Record framing and vertex stride ✅ — all eight shipped tables walk to EOF with their declared counts using four leading `u32` fields, a length-prefixed name, one-byte flag, vertex count and fixed 24-byte vertices; the absolute `f64` pixel-coordinate interpretation follows Raan's findings.
 - Unknown fields 🟡 — meanings of `var0`, `var1`, `var2`, the region flag and the final eight bytes per vertex remain unresolved.
 - **Reimplementation note** — parse the sequential records and double-precision vertex loops directly, retaining the world ID and opaque fields rather than reconstructing alleged baked pointers or deriving regions from another source.

@@ -66,7 +66,9 @@ List:
         f32   volume         // playback gain, NOT a selection weight
 ```
 
-Zone names match the **`MusicV1.0` region table** (`region.001`, [`region.md`](region.md)).
+Zone names are identifier forms of the **`MusicV1.0` region table** (`region.001`, [`region.md`](region.md)) names, not necessarily exact display-name matches.
+Replace each character outside ASCII letters, digits and `_` with one underscore, preserving case and repeated underscores: `Aleroth Woods (Dark)` → `Aleroth_Woods__Dark_`, `Light Woods` → `Light_Woods`.
+This joins 152 of the 155 shipped music polygons to zone bindings; `map3_extra1`, `map3_extra2` and `map3_extra3` have no binding.
 L0 holds primary music; L1 is reserved and unused; L2 holds timed overrides, untriggered in the shipped engine.
 L3 and L4 hold day and night ambients respectively, not alternate music playlists.
 Music lists resolve against section 1; ambient lists resolve against section 2.
@@ -84,6 +86,6 @@ The earlier two-list, weighted day/night-music interpretation was incorrect.
   records (no trailing field); 22 place-named tracks. *Corrects an
   earlier "zones" mislabel.*
 - Section 3 (zone map) ✅ — `u32 count(153)` zones with five assignment lists and a trailing flag; each assignment stores a label and volume.
-- Region → track link ✅ (by name) — the `MusicV1.0` regions (`region.001`) match zone names; L0 supplies music and L3/L4 supply day/night ambients.
+- Region → track link ✅ (by identifier-normalized name) — the `MusicV1.0` regions (`region.001`) match zone identifiers; L0 supplies music and L3/L4 supply day/night ambients.
 - The `field` (`+after file`, always 0) ❓ — a track flag/type, unused
   in the shipped data.

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"math/rand/v2"
+	"strings"
 
 	"grono.dev/opendivine/pkg/assets/musicdat"
 	"grono.dev/opendivine/pkg/assets/region"
@@ -71,9 +72,16 @@ func (r *RegionMusic) Update(worldID uint32, x, y float64) error {
 	r.initialized, r.worldID, r.zone = true, worldID, name
 	r.player.Stop()
 
-	entries := r.zones[name]
+	label := musicZoneLabel(name)
+
+	entries, found := r.zones[label]
+	if !found {
+		log.Printf("music region %q: no music.dat binding %q", name, label)
+		return nil
+	}
+
 	if len(entries) == 0 {
-		log.Printf("music zone %q: no primary music", name)
+		log.Printf("music zone %q: empty primary music list", name)
 		return nil
 	}
 
@@ -85,4 +93,17 @@ func (r *RegionMusic) Update(worldID uint32, x, y float64) error {
 	log.Printf("music zone %q: playing %q (volume %.2f)", name, entry.Label, entry.Volume)
 
 	return nil
+}
+
+// The music database replaces each non-identifier character in polygon names
+// with an underscore: "Aleroth Woods (Dark)" becomes "Aleroth_Woods__Dark_".
+// Repeated underscores are significant and must not be collapsed.
+func musicZoneLabel(name string) string {
+	return strings.Map(func(r rune) rune {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' {
+			return r
+		}
+
+		return '_'
+	}, name)
 }

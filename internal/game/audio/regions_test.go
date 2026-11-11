@@ -46,7 +46,7 @@ func TestRegionMusicTransitions(t *testing.T) {
 		}},
 		{Label: "B", Lists: [5][]musicdat.Assignment{{{Label: "other", Volume: 0.3}}}},
 		{Label: "C", Lists: [5][]musicdat.Assignment{{{Label: "world1", Volume: 0.5}}}},
-		{Label: "ambient only", Lists: [5][]musicdat.Assignment{
+		{Label: "ambient_only", Lists: [5][]musicdat.Assignment{
 			3: {{Label: "day", Volume: 1}}, 4: {{Label: "night", Volume: 1}},
 		}},
 	}}
@@ -121,6 +121,45 @@ func TestRegionMusicRetriesAfterTransition(t *testing.T) {
 	assert.NilError(t, r.Update(0, 20, 20))
 	assert.NilError(t, r.Update(0, 1, 1))
 	assert.Equal(t, len(player.plays), 2)
+}
+
+// Polygon display names and music.dat identifiers use different punctuation.
+// These pairs come from the shipped tables, including repeated underscores.
+func TestRegionMusicMatchesIdentifierLabels(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name  string
+		label string
+	}{
+		{"Aleroth Woods (Dark)", "Aleroth_Woods__Dark_"},
+		{"Aleroth Woods (Light)", "Aleroth_Woods__Light_"},
+		{"Light Woods", "Light_Woods"},
+		{"Digger / Watch Cellar (?)", "Digger___Watch_Cellar____"},
+		{"Swamps - Stone & Earth", "Swamps___Stone___Earth"},
+		{"Dw. Bread Cellar", "Dw__Bread_Cellar"},
+		{"joram_cellar", "joram_cellar"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			m := &MusicManager{zones: []musicdat.Zone{
+				{Label: tc.label, Lists: [5][]musicdat.Assignment{{{Label: "track", Volume: 0.5}}}},
+			}}
+			table := &region.File{Tag: region.SubTagMusic, Records: []region.Record{
+				{Name: tc.name, Vertices: []region.Vertex{{X: 0, Y: 0}, {X: 10, Y: 0}, {X: 0, Y: 10}}},
+			}}
+			r, err := NewRegionMusic(m, table)
+			assert.NilError(t, err)
+
+			player := &recordingMusicPlayer{}
+			r.player = player
+
+			assert.NilError(t, r.Update(0, 1, 1))
+			assert.Equal(t, len(player.plays), 1)
+			assert.Equal(t, player.plays[0], musicPlayback{"track", true, 0.5})
+		})
+	}
 }
 
 func TestRegionMusicRequiresMusicTable(t *testing.T) {
