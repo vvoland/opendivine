@@ -154,6 +154,24 @@ func (m *MusicManager) PlayMusic(label string, loop bool, volume float64) error 
 	return nil
 }
 
+// SetVolume changes the current music's volume without restarting its stream.
+// Volume must be in [0, 1].
+// With no current stream, it does nothing.
+func (m *MusicManager) SetVolume(volume float64) error {
+	if math.IsNaN(volume) || volume < 0 || volume > 1 {
+		return fmt.Errorf("audio: invalid music volume %v", volume)
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.cur != nil {
+		m.cur.SetVolume(volume)
+	}
+
+	return nil
+}
+
 // Stop halts the currently playing music. Safe to call when nothing
 // is playing.
 func (m *MusicManager) Stop() {

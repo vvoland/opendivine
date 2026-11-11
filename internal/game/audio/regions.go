@@ -15,6 +15,7 @@ import (
 
 type musicPlayer interface {
 	PlayMusic(label string, loop bool, volume float64) error
+	SetVolume(volume float64) error
 	Stop()
 }
 
@@ -29,6 +30,7 @@ type RegionMusic struct {
 	initialized bool
 	worldID     uint32
 	zone        string
+	track       string
 }
 
 // NewRegionMusic connects a music manager to a MusicV1.0 region table.
@@ -49,8 +51,9 @@ func NewRegionMusic(m *MusicManager, regions *region.File) (*RegionMusic, error)
 }
 
 // Update changes tracks only when the player's zone or world changes.
-// One uniformly selected L0 entry loops until the next transition; its float
-// is playback volume, not a selection weight.
+// Keep the current track if the new zone permits it, adjusting its volume.
+// Otherwise, select one L0 entry uniformly and loop it.
+// Each entry's float is playback volume, not a selection weight.
 // This is a port policy, not the engine's full playlist/silence state machine.
 // An unbound zone or empty music list stops playback.
 // Failed playback is retried only after another transition, not every tick.
@@ -70,26 +73,47 @@ func (r *RegionMusic) Update(worldID uint32, x, y float64) error {
 	}
 
 	r.initialized, r.worldID, r.zone = true, worldID, name
-	r.player.Stop()
 
 	label := musicZoneLabel(name)
 
 	entries, found := r.zones[label]
 	if !found {
+		r.player.Stop()
+		r.track = ""
+
 		log.Printf("music region %q: no music.dat binding %q", name, label)
 		return nil
 	}
 
 	if len(entries) == 0 {
+		r.player.Stop()
+		r.track = ""
+
 		log.Printf("music zone %q: empty primary music list", name)
 		return nil
 	}
+
+	for _, entry := range entries {
+		if r.track != "" && entry.Label == r.track {
+			if err := r.player.SetVolume(float64(entry.Volume)); err != nil {
+				return fmt.Errorf("music zone %q track %q volume: %w", name, entry.Label, err)
+			}
+
+			log.Printf("music zone %q: continuing %q (volume %.2f)", name, entry.Label, entry.Volume)
+
+			return nil
+		}
+	}
+
+	r.player.Stop()
+	r.track = ""
 
 	entry := entries[rand.IntN(len(entries))]
 	if err := r.player.PlayMusic(entry.Label, true, float64(entry.Volume)); err != nil {
 		return fmt.Errorf("music zone %q track %q: %w", name, entry.Label, err)
 	}
 
+	r.track = entry.Label
 	log.Printf("music zone %q: playing %q (volume %.2f)", name, entry.Label, entry.Volume)
 
 	return nil

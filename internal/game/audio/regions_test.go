@@ -21,9 +21,10 @@ type musicPlayback struct {
 }
 
 type recordingMusicPlayer struct {
-	plays []musicPlayback
-	stops int
-	err   error
+	plays   []musicPlayback
+	volumes []float64
+	stops   int
+	err     error
 }
 
 func (p *recordingMusicPlayer) PlayMusic(label string, loop bool, volume float64) error {
@@ -32,6 +33,11 @@ func (p *recordingMusicPlayer) PlayMusic(label string, loop bool, volume float64
 }
 
 func (p *recordingMusicPlayer) Stop() { p.stops++ }
+
+func (p *recordingMusicPlayer) SetVolume(volume float64) error {
+	p.volumes = append(p.volumes, volume)
+	return p.err
+}
 
 // Zone changes, not frames or camera movement, drive playback. Overlapping
 // polygons use file order, worlds stay separate and gains are not pick weights.
@@ -93,6 +99,48 @@ func TestRegionMusicTransitions(t *testing.T) {
 
 	assert.NilError(t, r.Update(0, 5, 5))
 	assert.Equal(t, len(player.plays), 4, "re-entry must start music again")
+}
+
+// Adjacent zones can share a track even when the new playlist has alternatives
+// or a different gain. Keep its stream, but clear it when leaving music zones.
+func TestRegionMusicContinuesSharedTrack(t *testing.T) {
+	t.Parallel()
+
+	square := []region.Vertex{{X: 0, Y: 0}, {X: 10, Y: 0}, {X: 10, Y: 10}, {X: 0, Y: 10}}
+	otherSquare := []region.Vertex{{X: 20, Y: 0}, {X: 30, Y: 0}, {X: 30, Y: 10}, {X: 20, Y: 10}}
+	m := &MusicManager{zones: []musicdat.Zone{
+		{Label: "A", Lists: [5][]musicdat.Assignment{{{Label: "Stream", Volume: 0.3}}}},
+		{Label: "B", Lists: [5][]musicdat.Assignment{
+			{{Label: "4", Volume: 0.2}, {Label: "Stream", Volume: 0.6}},
+		}},
+	}}
+	table := &region.File{Tag: region.SubTagMusic, Records: []region.Record{
+		{Name: "A", WorldID: 0, Vertices: square},
+		{Name: "B", WorldID: 0, Vertices: otherSquare},
+		{Name: "B", WorldID: 1, Vertices: square},
+	}}
+	r, err := NewRegionMusic(m, table)
+	assert.NilError(t, err)
+
+	player := &recordingMusicPlayer{}
+	r.player = player
+
+	assert.NilError(t, r.Update(0, 5, 5))
+	assert.Equal(t, len(player.plays), 1)
+	assert.Equal(t, player.plays[0].label, "Stream")
+	assert.NilError(t, r.Update(0, 25, 5))
+	assert.NilError(t, r.Update(1, 5, 5))
+	assert.NilError(t, r.Update(0, 5, 5))
+	assert.Equal(t, len(player.plays), 1, "crossing a zone must not reopen a shared track")
+	assert.Equal(t, player.stops, 1)
+	assert.Assert(t, is.DeepEqual(player.volumes, []float64{
+		float64(float32(0.6)), float64(float32(0.6)), float64(float32(0.3)),
+	}))
+
+	assert.NilError(t, r.Update(0, 100, 100))
+	assert.Equal(t, player.stops, 2)
+	assert.NilError(t, r.Update(0, 5, 5))
+	assert.Equal(t, len(player.plays), 2, "returning from silence must restart playback")
 }
 
 // A corrupt or missing clip must not trigger archive reads and log spam every
@@ -170,11 +218,12 @@ func TestRegionMusicRequiresMusicTable(t *testing.T) {
 }
 
 // Reject invalid gains before reading an archive or reaching the audio backend.
-func TestPlayMusicRejectsInvalidVolume(t *testing.T) {
+func TestMusicRejectsInvalidVolume(t *testing.T) {
 	t.Parallel()
 
 	m := &MusicManager{}
 	for _, volume := range []float64{-0.1, 1.1, math.NaN(), math.Inf(1)} {
 		assert.ErrorContains(t, m.PlayMusic("track", true, volume), "invalid music volume")
+		assert.ErrorContains(t, m.SetVolume(volume), "invalid music volume")
 	}
 }
