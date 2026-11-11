@@ -1,5 +1,5 @@
-# build
-FROM --platform=$BUILDPLATFORM golang:1.27-trixie AS build
+# development
+FROM --platform=$BUILDPLATFORM golang:1.27-trixie AS devcontainer
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
@@ -16,6 +16,9 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=bind,source=go.mod,destination=go.mod \
     --mount=type=bind,source=./hack,destination=/hack \
     /hack/install-deps.sh dev
+
+# build
+FROM devcontainer AS build
 
 ARG TARGETOS
 ARG TARGETARCH
