@@ -43,6 +43,11 @@ On failure it prints every path it tried.
 
 Useful flags: `-class {surm,surf,warm,warf,wizm,wizf}`, `-posx`, `-posy`, `-zoom`, `-region`.
 
+## Development shell
+
+On Linux with Docker, Make, and Go installed, run `make shell` for a development shell with persistent Go caches and available graphics, audio, and game data forwarded.
+Use `go run ./cmd/gamedata-probe` to print the detected host game-data path.
+
 ## Showcase
 
 
